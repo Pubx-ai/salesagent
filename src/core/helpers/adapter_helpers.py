@@ -44,6 +44,7 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
     )
 
 
+from src.adapters.base import AdServerAdapter
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
@@ -54,7 +55,7 @@ from src.core.schemas import Principal
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> MockAdServerAdapter | GoogleAdManager | Kevel | TritonDigital:
+) -> AdServerAdapter:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:
@@ -186,8 +187,37 @@ def get_adapter(
         return Kevel(adapter_config, principal, dry_run, tenant_id=tenant_id)
     elif selected_adapter in ["triton", "triton_digital"]:
         return TritonDigital(adapter_config, principal, dry_run, tenant_id=tenant_id)
+    elif selected_adapter == "curation":
+        from src.adapters.curation import CurationAdapter
+
+        # Load curation-specific config from adapter config if available
+        if config_row and hasattr(config_row, "connection_config") and config_row.connection_config:
+            curation_cfg = config_row.connection_config
+            if isinstance(curation_cfg, dict):
+                adapter_config.update(curation_cfg)
+
+        return CurationAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
         # Default to mock for unsupported adapters
         return MockAdServerAdapter(
             adapter_config, principal, dry_run, tenant_id=tenant_id, strategy_context=testing_context
         )
+
+
+def adapter_manages_own_persistence(tenant: dict[str, Any]) -> bool:
+    """Check if the tenant's adapter type manages its own persistence.
+
+    Uses the ADAPTER_REGISTRY class attribute to avoid instantiating
+    the adapter (which would trigger DB calls and test side effects).
+    """
+    ad_server_config = tenant.get("ad_server", {})
+    adapter_type = ad_server_config.get("adapter", "mock") if isinstance(ad_server_config, dict) else ad_server_config
+    try:
+        from src.adapters import ADAPTER_REGISTRY
+
+        adapter_class = ADAPTER_REGISTRY.get(adapter_type)
+        if adapter_class is not None:
+            return getattr(adapter_class, "manages_own_persistence", False) is True
+    except Exception:
+        pass
+    return False

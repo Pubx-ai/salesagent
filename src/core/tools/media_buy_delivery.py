@@ -161,6 +161,52 @@ def _get_media_buy_delivery_impl(
 
     reporting_period = MediaBuyReportingPeriod(start=start_dt, end=end_dt)
 
+    # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
+    # These adapters bypass Postgres entirely -- call adapter.get_media_buy_delivery() directly.
+    if getattr(adapter, "manages_own_persistence", False) is True:
+        media_buy_ids = req.media_buy_ids or []
+        deliveries = []
+        ext_errors: list[Error] = []
+        total_spend = 0.0
+        total_impressions = 0
+
+        for mb_id in media_buy_ids:
+            try:
+                adapter_resp = adapter.get_media_buy_delivery(mb_id, reporting_period, datetime.now(UTC))
+
+                status_resp = adapter.check_media_buy_status(mb_id, datetime.now(UTC))
+
+                deliveries.append(
+                    MediaBuyDeliveryData(
+                        media_buy_id=mb_id,
+                        buyer_ref=getattr(status_resp, "buyer_ref", None),
+                        status=getattr(status_resp, "status", "active"),
+                        pricing_model=PricingModel("cpm"),
+                        totals=adapter_resp.totals,
+                        by_package=[],
+                    )
+                )
+                total_spend += float(adapter_resp.totals.spend or 0)
+                total_impressions += int(adapter_resp.totals.impressions or 0)
+            except Exception as e:
+                logger.error("Error getting delivery for %s from external adapter: %s", mb_id, e)
+                ext_errors.append(Error(code="not_found", message=f"Media buy {mb_id} not found or unavailable"))
+
+        return GetMediaBuyDeliveryResponse(
+            reporting_period={"start": reporting_period.start, "end": reporting_period.end},
+            currency="USD",
+            aggregated_totals=AggregatedTotals(
+                impressions=float(total_impressions),
+                spend=total_spend,
+                clicks=None,
+                video_completions=None,
+                media_buy_count=len(deliveries),
+            ),
+            media_buy_deliveries=deliveries,
+            errors=ext_errors or None,
+            context=req.context,
+        )
+
     # Determine reference date for status calculations use end_date, it either will be today or the user provided end_date.
     reference_date = end_dt.date()
 

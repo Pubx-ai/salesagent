@@ -72,6 +72,19 @@ app = FastAPI(
 app.mount("/mcp", mcp_app)
 
 
+@app.api_route("/mcp", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+async def mcp_trailing_slash_redirect(request: Request):
+    """Redirect /mcp to /mcp/ so the MCP sub-app handles the request.
+
+    FastAPI mounts only match paths with a trailing slash. Some MCP clients
+    (e.g. the ``adcp`` CLI) strip the trailing slash, resulting in a 404
+    from the Flask catch-all mount. This redirect ensures they reach the
+    MCP server regardless.
+    """
+    url = request.url.replace(path="/mcp/")
+    return RedirectResponse(url=str(url), status_code=307)
+
+
 # ---------------------------------------------------------------------------
 # AdCP exception handlers — translate typed exceptions to HTTP responses.
 # ---------------------------------------------------------------------------

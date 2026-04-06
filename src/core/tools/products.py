@@ -343,29 +343,49 @@ async def _get_products_impl(
         ad_server_config.get("adapter", "mock") if isinstance(ad_server_config, dict) else ad_server_config
     )
 
-    # Query products via repository (tenant-scoped)
-    from src.core.database.repositories.uow import ProductUoW
+    # Check if the adapter provides its own product catalog (e.g. CurationAdapter).
+    # Uses registry class attribute check to avoid unnecessary adapter instantiation.
+    adapter_products = None
+    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
 
-    with ProductUoW(tenant["tenant_id"]) as uow:
-        assert uow.products is not None
-        db_products = uow.products.list_all()
+    if principal and getattr(principal, "principal_id", None) and adapter_manages_own_persistence(tenant):
+        try:
+            from src.core.helpers.adapter_helpers import get_adapter
 
-        # Convert database Product models to AdCP Product schema
-        products = []
-        for product_obj in db_products:
-            try:
-                validated_product = convert_product_model_to_schema(product_obj, adapter_type=tenant_adapter_type)
-                products.append(validated_product)
-                logger.debug(f"Successfully converted product {product_obj.product_id}")
-            except Exception as e:
-                error_msg = (
-                    f"Product '{product_obj.product_id}' failed to convert to AdCP schema. "
-                    f"This indicates data corruption or migration issue. Error: {e}"
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg) from e
+            adapter_instance = get_adapter(principal, dry_run=True, tenant=tenant)
+            adapter_products = adapter_instance.get_product_catalog(tenant["tenant_id"])
+        except Exception:
+            logger.exception("[GET_PRODUCTS] Adapter product catalog fetch failed for tenant %s", tenant["tenant_id"])
 
-    logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
+    if adapter_products is not None:
+        products = adapter_products
+        logger.info(
+            f"[GET_PRODUCTS] Got {len(products)} products from adapter catalog for tenant {tenant['tenant_id']}"
+        )
+    else:
+        # Default path: query products via repository (tenant-scoped)
+        from src.core.database.repositories.uow import ProductUoW
+
+        with ProductUoW(tenant["tenant_id"]) as uow:
+            assert uow.products is not None
+            db_products = uow.products.list_all()
+
+            # Convert database Product models to AdCP Product schema
+            products = []
+            for product_obj in db_products:
+                try:
+                    validated_product = convert_product_model_to_schema(product_obj, adapter_type=tenant_adapter_type)
+                    products.append(validated_product)
+                    logger.debug(f"Successfully converted product {product_obj.product_id}")
+                except Exception as e:
+                    error_msg = (
+                        f"Product '{product_obj.product_id}' failed to convert to AdCP schema. "
+                        f"This indicates data corruption or migration issue. Error: {e}"
+                    )
+                    logger.error(error_msg)
+                    raise ValueError(error_msg) from e
+
+        logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
 
     # Filter products by principal access control
     # Products with allowed_principal_ids set are only visible to those specific principals

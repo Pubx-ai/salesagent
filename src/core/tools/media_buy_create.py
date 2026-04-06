@@ -11,7 +11,7 @@ Handles media buy creation including:
 import logging
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from urllib.parse import urlparse
 
@@ -128,6 +128,83 @@ from src.core.validation_helpers import format_validation_error
 from src.services.activity_feed import activity_feed
 
 # --- Helper Functions ---
+
+
+def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[MediaPackage]:
+    """Build simplified MediaPackage list from request for external adapters.
+
+    Used by adapters with manages_own_persistence=True that bypass Postgres.
+    """
+    from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
+
+    packages: list[MediaPackage] = []
+    for i, pkg in enumerate(req.packages or []):
+        product_id = getattr(pkg, "product_id", "unknown")
+        bid_price = getattr(pkg, "bid_price", None)
+        packages.append(
+            MediaPackage(
+                package_id=getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}",
+                name=f"Package for {product_id}",
+                delivery_type="non_guaranteed",
+                cpm=float(bid_price) if bid_price else 0.0,
+                impressions=0,
+                format_ids=[LibraryFormatId(id="display_banner", agent_url="https://curation.local")],
+                product_id=product_id,
+                buyer_ref=getattr(pkg, "buyer_ref", None),
+            )
+        )
+    return packages
+
+
+def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime]:
+    """Extract and validate start/end times from a CreateMediaBuyRequest."""
+    now = datetime.now(UTC)
+
+    raw_start = req.start_time.root if req.start_time else "asap"
+    if raw_start == "asap":
+        start = now
+    elif isinstance(raw_start, str):
+        start = datetime.fromisoformat(raw_start)
+    elif isinstance(raw_start, datetime):
+        start = raw_start
+    else:
+        start = now
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+
+    end = req.end_time if req.end_time else start + timedelta(days=30)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=UTC)
+
+    return start, end
+
+
+def _build_package_pricing_info(req: CreateMediaBuyRequest) -> dict[str, dict[str, Any]]:
+    """Build package_pricing_info dict from request packages.
+
+    Extracts bid_price and pricing_option_id from each package to pass
+    to the adapter's create_media_buy.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for i, pkg in enumerate(req.packages or []):
+        product_id = getattr(pkg, "product_id", "unknown")
+        pkg_id = getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}"
+        bid_price = getattr(pkg, "bid_price", None)
+        result[pkg_id] = {
+            "pricing_model": getattr(pkg, "pricing_model", None) or "cpm",
+            "currency": getattr(pkg, "currency", None) or "USD",
+            "rate": float(bid_price) if bid_price else None,
+            "bid_price": float(bid_price) if bid_price else None,
+            "is_fixed": False,
+        }
+    return result
+
+
+def _adapter_manages_own_persistence(tenant: dict[str, Any]) -> bool:
+    """Delegate to shared helper in adapter_helpers."""
+    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
+
+    return adapter_manages_own_persistence(tenant)
 
 
 # NOTE: _sanitize_package_status() removed in adcp 2.12.0 migration
@@ -1338,6 +1415,33 @@ async def _create_media_buy_impl(
             ),
             status=AdcpTaskStatus.failed.value,
         )
+
+    # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
+    # These adapters bypass Postgres entirely -- no buyer_ref dedup, no workflow steps,
+    # no ORM MediaBuy/MediaPackage creation. The adapter handles the full lifecycle.
+    # Check via the class attribute on the registry to avoid instantiating the adapter
+    # (which would trigger get_adapter side effects in unit tests).
+    manages_own_persistence = _adapter_manages_own_persistence(tenant)
+
+    if manages_own_persistence:
+        try:
+            ext_adapter = get_adapter(
+                principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant
+            )
+            ext_packages = _build_packages_for_external_adapter(req)
+            start_time, end_time = _parse_request_times(req)
+            pkg_pricing = _build_package_pricing_info(req)
+
+            response = ext_adapter.create_media_buy(req, ext_packages, start_time, end_time, pkg_pricing)
+            status = (
+                AdcpTaskStatus.completed.value
+                if isinstance(response, CreateMediaBuySuccess)
+                else AdcpTaskStatus.failed.value
+            )
+            return CreateMediaBuyResult(response=response, status=status)
+        except Exception as e:
+            logger.exception("External adapter create_media_buy failed")
+            raise AdCPAdapterError(f"Adapter error: {e}") from e
 
     # Validate buyer_ref uniqueness within tenant+principal scope (BR-RULE-009)
     if req.buyer_ref:
@@ -3388,19 +3492,19 @@ async def _create_media_buy_impl(
             # Check if manual approval is required for creatives
             require_creative_approval = manual_approval_required and "add_creative_assets" in manual_approval_operations
 
-            for status in statuses:
+            for asset_status in statuses:
                 # Skip statuses without creative_id (shouldn't happen but defensive)
-                if status.creative_id:
+                if asset_status.creative_id:
                     # Override status to pending_review if manual approval is required for creatives
                     if require_creative_approval:
                         final_status: str = "pending_review"
                         detail = "Creative requires manual approval"
                     else:
-                        final_status = "approved" if status.status == "approved" else "pending_review"
+                        final_status = "approved" if asset_status.status == "approved" else "pending_review"
                         detail = "Creative submitted to ad server"
 
-                    creative_statuses[status.creative_id] = CreativeApprovalStatus(
-                        creative_id=status.creative_id,
+                    creative_statuses[asset_status.creative_id] = CreativeApprovalStatus(
+                        creative_id=asset_status.creative_id,
                         status=cast(Any, final_status),
                         detail=detail,
                     )

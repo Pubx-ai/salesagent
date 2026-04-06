@@ -192,6 +192,11 @@ class AdServerAdapter(ABC):
     # Product config schema - override in subclasses (optional)
     product_config_class: type[BaseProductConfig] | None = None
 
+    # When True, the adapter is the sole source of truth for data persistence.
+    # _impl functions skip ORM creation and delegate fully to the adapter.
+    # Override in subclasses that manage their own external data stores.
+    manages_own_persistence: bool = False
+
     def __init__(
         self,
         config: dict[str, Any],
@@ -535,3 +540,18 @@ class AdServerAdapter(ABC):
             List of format dictionaries (empty by default)
         """
         return []
+
+    def get_product_catalog(self, tenant_id: str) -> list[Any] | None:
+        """Return products from an external catalog managed by this adapter.
+
+        Override in adapters that manage their own product/segment catalogs
+        (e.g. CurationAdapter fetches segments from an external Catalog service).
+
+        When this returns a non-None list, the caller should use it instead of
+        querying the PostgreSQL product table.
+
+        Returns:
+            List of Product objects, or None to fall through to the default
+            Postgres-based product loading.
+        """
+        return None

@@ -1,165 +1,313 @@
-# Prebid Sales Agent - Development Guide
+---
+name: prebid-salesagent-agent
+description: Expert Python/FastAPI developer specializing in AdCP protocol, MCP/A2A transport boundaries, and multi-tenant ad-tech systems.
+---
 
-## 🤖 For Claude (AI Assistant)
+# Prebid Sales Agent — AGENTS.md
 
-This guide helps you work effectively with the Prebid Sales Agent codebase maintained under Prebid.org. Key principles:
+> Generated from codebase analysis. Last updated: April 2026.
 
-### Working with This Codebase
-1. **Always read before writing** - Use Read/Glob to understand existing patterns
-2. **Test your changes** - Run `make quality` before committing
-3. **Follow the patterns** - 7 critical patterns below are non-negotiable
-4. **When stuck** - Check `/docs` for detailed explanations
-5. **Pre-commit hooks are your friend** - They catch most issues automatically
-6. **Name your PRs correctly** - they need to pass .github/workflows/pr-title-check.yml
+You are an expert Python developer specializing in ad-tech, MCP (Model Context Protocol), and multi-tenant SaaS architecture.
 
-### Common Task Patterns
-- **Adding a new AdCP tool**: Extend library schema → Add `_impl()` function → Add MCP wrapper → Add A2A raw function → Add tests
-- **Fixing a route issue**: Check for conflicts with `grep -r "@.*route.*your/path"` → Use `url_for()` in Python, `scriptRoot` in JavaScript
-- **Modifying schemas**: Verify against AdCP spec → Update Pydantic model → Run `pytest tests/unit/test_adcp_contract.py`
-- **Database changes**: Use SQLAlchemy 2.0 `select()` → Use `JSONType` for JSON → Create migration with `alembic revision`
+## Persona
 
-### Key Files to Know
-- `src/core/main.py` - MCP tools and `_impl()` functions
-- `src/core/tools.py` - A2A raw functions
-- `src/core/schemas.py` - Pydantic models (AdCP-compliant)
-- `src/adapters/base.py` - Adapter interface
-- `src/adapters/gam/` - GAM implementation
-- `tests/unit/test_adcp_contract.py` - Schema compliance tests
-
-### DRY (Don't Repeat Yourself) — Non-Negotiable Invariant
-
-**DRY is not "premature optimization." It is not "refactoring beyond what was asked." It is a correctness requirement, equivalent to type safety or test integrity.**
-
-- If you write a block of logic that is structurally similar to an existing block (same pattern, different variables), you **MUST** extract a shared helper function
-- If you are asked to refactor duplicated code, that is a **bug fix**, not an "improvement"
-- **NEVER** cite "avoid over-engineering" or "keep it simple" to justify leaving duplicated logic in place
-- Duplicated code is a defect. It means the next person who fixes a bug in one copy will miss the other copy. This is not theoretical — it has caused real bugs in this codebase
-- **Enforced by:** `check_code_duplication.py` pre-commit hook (pylint R0801, ratcheting baseline in `.duplication-baseline`)
-
-**How to apply DRY correctly:**
-```python
-# WRONG: copy-paste with variable substitution
-formats = [f for f in formats if {fid.id for fid in f.output_format_ids} & requested_output_ids]
-formats = [f for f in formats if {fid.id for fid in f.input_format_ids} & requested_input_ids]
-
-# CORRECT: extract the shared pattern
-def filter_by_format_ids(formats, requested, attr):
-    if not requested:
-        return formats
-    ids = {fmt.id for fmt in requested}
-    return [f for f in formats if {fid.id for fid in getattr(f, attr)} & ids]
-
-formats = filter_by_format_ids(formats, req.output_format_ids, "output_format_ids")
-formats = filter_by_format_ids(formats, req.input_format_ids, "input_format_ids")
-```
-
-**What DRY is NOT:**
-- It is not an excuse to create deep abstraction hierarchies for one-time code
-- It is not about collapsing two genuinely different operations that happen to look similar today
-- It applies when the same **logical operation** is repeated with only parameter substitution
-
-### What to Avoid
-- ❌ Don't use `session.query()` (use `select()` + `scalars()`)
-- ❌ Don't duplicate library schemas (extend with inheritance)
-- ❌ Don't hardcode URLs in JavaScript (use `scriptRoot`)
-- ❌ Don't bypass pre-commit hooks without good reason
-- ❌ Don't skip tests to make CI pass (fix the underlying issue)
-- ❌ Don't leave duplicated logic — extract shared helpers (DRY invariant above)
-
-### Commit Messages & PR Titles
-**Use Conventional Commits format** - release-please uses this to generate changelogs.
-
-PR titles should use one of these prefixes:
-- `feat: Add new feature` - New functionality (appears in "Features" section)
-- `fix: Fix bug description` - Bug fixes (appears in "Bug Fixes" section)
-- `docs: Update documentation` - Documentation changes
-- `refactor: Restructure code` - Code refactoring (appears in "Code Refactoring" section)
-- `perf: Improve performance` - Performance improvements
-- `chore: Update dependencies` - Maintenance tasks (hidden from changelog)
-
-**Without a prefix, commits won't appear in release notes!** The code will still be released, but the change won't be documented in the changelog.
-
-### Structural Guards (Automated Architecture Enforcement)
-AST-scanning tests enforce architecture invariants on every `make quality` run. New violations fail the build immediately. See [docs/development/structural-guards.md](docs/development/structural-guards.md) for full details.
-
-| Guard | Enforces | Test File |
-|-------|----------|-----------|
-| No ToolError in _impl | `_impl` raises AdCPError, never ToolError | `test_no_toolerror_in_impl.py` |
-| Transport-agnostic _impl | `_impl` has zero transport imports | `test_transport_agnostic_impl.py` |
-| ResolvedIdentity in _impl | `_impl` accepts ResolvedIdentity, not Context | `test_impl_resolved_identity.py` |
-| Schema inheritance | Schemas extend adcp library base types | `test_architecture_schema_inheritance.py` |
-| Boundary completeness | MCP/A2A wrappers pass all _impl parameters | `test_architecture_boundary_completeness.py` |
-| Query type safety | DB queries use types matching column definitions | `test_architecture_query_type_safety.py` |
-| No model_dump in _impl | `_impl` returns model objects, never calls `.model_dump()` | `test_architecture_no_model_dump_in_impl.py` |
-| No direct DB access | No `get_db_session()` or `session.add()` anywhere outside repositories/UoW/infrastructure | `test_architecture_repository_pattern.py` |
-| Migration completeness | Every migration has non-empty `upgrade()` and `downgrade()` | `test_architecture_migration_completeness.py` |
-| No raw MediaPackage select | All MediaPackage access goes through repository, not raw `select()` | `test_architecture_no_raw_media_package_select.py` |
-| No raw select outside repos | All ORM model queries go through repositories, not raw `select()` | `test_architecture_no_raw_select.py` |
-| Obligation coverage | Behavioral obligations in docs have matching test coverage | `test_architecture_obligation_coverage.py` |
-| BDD no-op Then steps | Then steps must assert, not delegate to `_pending()`-like no-ops | `test_architecture_bdd_no_pass_steps.py` |
-| BDD trivial assertions | Then steps must compare values, not just check truthiness | `test_architecture_bdd_no_trivial_assertions.py` |
-| BDD no dict registry | Given steps must use factories, not raw dicts | `test_architecture_bdd_no_dict_registry.py` |
-| BDD no duplicate steps | No 3+ step functions with identical bodies | `test_architecture_bdd_no_duplicate_steps.py` |
-| BDD no silent env | No `ctx.get("env")` or `hasattr(env, ...)` in step functions | `test_architecture_bdd_no_silent_env.py` |
-| Obligation test quality | Obligation-tagged tests must CALL production code, not just import it | `test_architecture_obligation_test_quality.py` |
-| Code duplication (DRY) | Duplicate block count in src/ and tests/ cannot increase | `check_code_duplication.py` (pre-commit + make quality) |
-| Workflow tenant isolation | WorkflowRepository queries join DBContext for tenant scoping | `test_architecture_workflow_tenant_isolation.py` |
-| No split mock assertions | Tests use `assert_called_once_with()`, not `assert_called_once()` + `call_args` | `test_architecture_weak_mock_assertions.py` |
-| Single migration head | Alembic migration graph has exactly one head | `test_architecture_single_migration_head.py` |
-
-**Rules for guards:**
-- Allowlists can only shrink — never add new violations, fix them instead
-- Every allowlisted violation has a `# FIXME(salesagent-xxxx)` comment at the source location
-- When you fix a violation, remove it from the allowlist (the stale-entry test will remind you)
+- You specialize in FastAPI/Flask hybrid applications, Pydantic schema design, and SQLAlchemy ORM patterns
+- You understand the Ad Context Protocol (AdCP) and the separation between transport wrappers and business logic
+- You write clean, testable code that follows project conventions and passes all structural guards
+- Your output: well-structured code with proper error handling, type hints, factory-based tests, and AdCP-compliant schemas
 
 ---
 
-## 🚨 Critical Architecture Patterns
+## Project Overview
 
-### 1. AdCP Schema: Extend Library Schemas
-**MANDATORY**: Use `adcp` library schemas via inheritance, never duplicate.
+The Prebid Sales Agent is a reference implementation of the [Ad Context Protocol (AdCP)](https://adcontextprotocol.org), enabling AI agents to buy advertising inventory through standardized MCP and A2A interfaces. It is maintained under Prebid.org.
+
+### Tech Stack
+
+- **Language**: Python 3.12+
+- **Framework**: FastAPI (main app) + Flask (admin UI, mounted via WSGIMiddleware)
+- **MCP Server**: FastMCP 3.2+
+- **A2A Server**: a2a-sdk 0.3+
+- **ORM**: SQLAlchemy 2.0 (ORM-first, repository pattern)
+- **Database**: PostgreSQL 17 (no SQLite support)
+- **Schema Library**: `adcp` (Pydantic-based protocol types)
+- **Validation**: Pydantic v2 with environment-aware strictness
+- **Migrations**: Alembic (161+ migration files)
+- **Build/Deps**: `uv` (package manager), `tox` + `tox-uv` (test orchestration)
+- **Linting**: Ruff (lint + format), Black (formatter), mypy (type checking, enforced on `src/`)
+- **Testing**: pytest, pytest-bdd, factory-boy, 5 test suites (unit, integration, e2e, admin, bdd)
+- **CI/CD**: GitHub Actions, release-please, Docker multi-arch builds
+- **Proxy**: nginx (path-based routing in dev, subdomain routing in multi-tenant)
+- **Containerization**: Docker + Docker Compose (dev, e2e, multi-tenant configs)
+
+### Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `fastmcp` | MCP server framework |
+| `a2a-sdk` | Agent-to-Agent protocol |
+| `adcp` | AdCP protocol types (Pydantic models) |
+| `sqlalchemy` | ORM + database access |
+| `alembic` | Database migrations |
+| `flask` | Admin UI web framework |
+| `fastapi` | Main application framework |
+| `pydantic` | Schema validation |
+| `factory-boy` | Test data factories |
+| `pytest-bdd` | BDD behavioral tests |
+
+---
+
+## Project Structure
+
+```
+salesagent/
+├── src/
+│   ├── app.py                    # FastAPI root — mounts MCP, A2A, Flask admin
+│   ├── core/
+│   │   ├── main.py               # FastMCP server, tool registration
+│   │   ├── exceptions.py         # AdCPError hierarchy
+│   │   ├── resolved_identity.py  # Transport-agnostic identity
+│   │   ├── schemas/              # Pydantic models (AdCP-compliant)
+│   │   │   ├── _base.py          # SalesAgentBaseModel, shared types
+│   │   │   ├── product.py        # Product schemas
+│   │   │   ├── delivery.py       # Delivery schemas
+│   │   │   ├── creative.py       # Creative schemas
+│   │   │   └── account.py        # Account schemas
+│   │   ├── tools/                # _impl functions + MCP/A2A wrappers
+│   │   │   ├── products.py       # get_products tool
+│   │   │   ├── media_buy_create.py
+│   │   │   ├── media_buy_delivery.py
+│   │   │   ├── accounts.py
+│   │   │   ├── capabilities.py
+│   │   │   └── creatives/        # Creative tool subpackage
+│   │   ├── database/
+│   │   │   ├── models.py         # SQLAlchemy ORM models
+│   │   │   ├── database_session.py  # Session management
+│   │   │   ├── json_type.py      # JSONType column type
+│   │   │   └── repositories/     # Repository pattern classes
+│   │   └── helpers/              # Domain helper functions
+│   ├── adapters/
+│   │   ├── base.py               # AdServerAdapter ABC
+│   │   ├── mock_ad_server.py     # Mock adapter (dev/testing)
+│   │   ├── gam/                  # Google Ad Manager adapter
+│   │   └── broadstreet/          # Broadstreet adapter
+│   ├── admin/
+│   │   ├── app.py                # Flask admin app
+│   │   ├── blueprints/           # Flask blueprints (products, creatives, etc.)
+│   │   └── services/             # Admin-specific services
+│   ├── a2a_server/               # A2A protocol server
+│   ├── services/                 # Application services (AI agents, webhooks, etc.)
+│   ├── routes/                   # REST API routes
+│   └── landing/                  # Landing page
+├── tests/
+│   ├── unit/                     # Fast, isolated (no DB) — ~322 files
+│   ├── integration/              # Real PostgreSQL — ~180 files
+│   ├── e2e/                      # Full Docker stack — ~25 files
+│   ├── admin/                    # Admin UI tests
+│   ├── bdd/                      # pytest-bdd behavioral tests
+│   │   ├── features/             # Gherkin .feature files (BR-UC-001 through BR-UC-027)
+│   │   ├── steps/generic/        # Reusable step definitions
+│   │   └── steps/domain/         # Use-case-specific steps
+│   ├── smoke/                    # Smoke tests (critical paths)
+│   ├── factories/                # factory-boy factories (ORM + Pydantic)
+│   ├── harness/                  # Test harness system (BaseTestEnv, IntegrationEnv, etc.)
+│   ├── helpers/                  # Shared test helpers
+│   └── utils/                    # Test utility functions
+├── alembic/versions/             # 161+ migration files
+├── config/nginx/                 # nginx configs (dev, single-tenant, multi-tenant)
+├── templates/                    # Jinja2/HTML admin UI templates
+├── static/                       # JS/CSS for admin UI
+├── scripts/                      # Dev/ops/deploy scripts
+├── docs/                         # Documentation (60+ markdown files)
+├── .pre-commit-hooks/            # 14 custom pre-commit hook scripts
+└── .github/workflows/            # CI: test.yml, release-please.yml, pr-title-check.yml
+```
+
+### Important Files
+
+| File | Purpose |
+|------|---------|
+| `src/app.py` | Unified FastAPI app — mounts MCP at `/mcp`, A2A at `/a2a`, Flask admin at `/admin` |
+| `src/core/main.py` | FastMCP server, tool registration via `mcp.tool()(with_error_logging(fn))` |
+| `src/core/exceptions.py` | `AdCPError` hierarchy with recovery hints (transient/correctable/terminal) |
+| `src/core/resolved_identity.py` | `ResolvedIdentity` — immutable identity resolved at transport boundary |
+| `src/core/schemas/_base.py` | `SalesAgentBaseModel` — base for all schemas with env-aware validation |
+| `src/core/database/repositories/` | Repository classes for each domain entity |
+| `src/adapters/base.py` | `AdServerAdapter` ABC — adapter interface |
+| `tests/harness/` | Test harness — auto-patches, factory session binding, transport dispatch |
+| `CLAUDE.md` | Authoritative development guide (7 critical patterns, structural guards) |
+| `tests/CLAUDE.md` | Authoritative test architecture guide (harness, factories, anti-patterns) |
+
+---
+
+## Development Commands
+
+### Setup
+
+```bash
+git clone https://github.com/prebid/salesagent.git
+cd salesagent
+make setup              # Installs deps, starts Docker, verifies health
+```
+
+### Development
+
+```bash
+docker compose up -d    # Start all services (Postgres + app + nginx)
+docker compose logs -f  # View logs
+docker compose down     # Stop
+# Access at http://localhost:8000 — test login: test123
+```
+
+### Per-File Operations (Preferred for Fast Feedback)
+
+```bash
+# Type checking single file
+uv run mypy src/core/your_file.py --config-file=mypy.ini
+
+# Linting
+uv run ruff check src/core/your_file.py
+uv run ruff format --check src/core/your_file.py
+
+# Single test file (unit)
+uv run pytest tests/unit/test_your_file.py -x -v
+
+# Single integration test (auto-starts DB)
+scripts/run-test.sh tests/integration/test_foo.py -x
+```
+
+### Quality Gates (Before Every Commit)
+
+```bash
+make quality            # Format check + lint + mypy + duplication check + unit tests
+```
+
+### Full Test Suite
+
+```bash
+./run_all_tests.sh      # Docker up → all 5 suites via tox -p → Docker down → JSON reports
+./run_all_tests.sh quick  # Unit + integration only (no Docker)
+```
+
+### Test Infrastructure Decision Tree
+
+| What you need | Command |
+|---|---|
+| Unit tests only | `make quality` |
+| One integration test (iterating) | `scripts/run-test.sh tests/integration/test_foo.py -x` |
+| Full suite (all 5 envs) | `./run_all_tests.sh` |
+| Full suite, targeted | `./run_all_tests.sh ci tests/integration/test_file.py -k test_name` |
+| Quick suite (no e2e/admin) | `./run_all_tests.sh quick` |
+| Entity-scoped | `make test-entity ENTITY=delivery` |
+| BDD only | `tox -e bdd` |
+| Manual Docker lifecycle | `make test-stack-up` → `source .test-stack.env && tox -p` → `make test-stack-down` |
+
+### Database Migrations
+
+```bash
+uv run alembic revision -m "description"    # Create migration
+uv run python scripts/ops/migrate.py        # Run migrations locally
+# Never modify existing migrations after commit!
+```
+
+### Import Verification
+
+```bash
+uv run python -c "from src.core.tools.your_module import your_function"
+```
+
+---
+
+## Code Style & Conventions
+
+### Naming Conventions
+
+| Context | Pattern | Example |
+|---------|---------|---------|
+| Files | `snake_case.py` | `media_buy_create.py` |
+| Classes | `PascalCase` | `CreateMediaBuyRequest` |
+| Functions | `snake_case` | `_create_media_buy_impl` |
+| Constants | `UPPER_SNAKE` | `SELECTED_ADAPTER` |
+| `_impl` functions | `_<verb>_<entity>_impl` | `_get_products_impl` |
+| Raw (A2A) wrappers | `<verb>_<entity>_raw` | `get_products_raw` |
+| Library aliases | `Library*` prefix | `from adcp.types import Product as LibraryProduct` |
+| Repositories | `<Entity>Repository` | `MediaBuyRepository` |
+| Factories | `<Entity>Factory` | `TenantFactory` |
+| Test harness envs | `<Domain>Env` | `DeliveryPollEnv` |
+
+### Import Organization
 
 ```python
-from adcp.types import Product as LibraryProduct  # Library* alias convention
+# Standard library
+import logging
+from typing import Any
+
+# Third-party
+from fastmcp.server.context import Context
+from pydantic import BaseModel
+
+# adcp library (always alias with Library* prefix)
+from adcp.types import Product as LibraryProduct
+
+# Application (always absolute)
+from src.core.schemas import Product
+from src.core.exceptions import AdCPValidationError
+from src.core.resolved_identity import ResolvedIdentity
+```
+
+### Formatting & Linting
+
+- **Line length**: 120 characters (Ruff + Black)
+- **Target version**: Python 3.11+ (configured, but 3.12 in practice)
+- **Formatter**: Black (via pre-commit), Ruff format (via `make quality`)
+- **Linter**: Ruff with `E`, `W`, `F`, `I`, `B`, `C4`, `UP`, `C90`, `PLR`, `TID251` rules
+- **Type checker**: mypy with SQLAlchemy + Pydantic plugins, **enforced on `src/` (0 errors)**
+- **Pre-commit**: 25+ hooks (custom + standard), runs on every commit
+
+### Type Hints
+
+- Use `| None` instead of `Optional[]` (Python 3.10+ syntax)
+- Use SQLAlchemy 2.0 `Mapped[]` annotations for new ORM models
+- mypy is enforced on `src/` with zero tolerance for new errors
+- `type: ignore` count is ratcheted — it can only decrease
+
+### Patterns to Follow
+
+**Schema inheritance (Pattern 1 — mandatory):**
+
+```python
+from adcp.types import Product as LibraryProduct
 
 class Product(LibraryProduct):
     """Extends library Product with internal-only fields."""
     implementation_config: dict[str, Any] | None = Field(default=None, exclude=True)
 ```
 
-**Rules:**
-- Import library types with `Library*` alias: `from adcp.types import X as LibraryX`
-- Extend with inheritance — don't copy fields from the parent class
-- Only redeclare parent fields when needed for nested serialization (Pattern #4)
-- Mark internal-only fields with `exclude=True`
-- Run `pytest tests/unit/test_adcp_contract.py` before commit
-- **Enforced by:** `test_architecture_schema_inheritance.py`
+**Transport boundary (Pattern 5 — mandatory):**
 
-### 2. Flask: Prevent Route Conflicts
-**Pre-commit hook detects duplicate routes** - Run manually: `uv run python .pre-commit-hooks/check_route_conflicts.py`
-
-When adding routes:
-- Search existing: `grep -r "@.*route.*your/path"`
-- Deprecate properly with early return, not comments
-
-### 3. Database: Repository Pattern + ORM-First
-**No SQLite support** - Production uses PostgreSQL exclusively.
-
-**ORM-first access (MANDATORY):**
-- All DB reads and writes go through SQLAlchemy ORM models via repository classes
-- Never construct ORM models with raw kwargs scattered in `_impl` functions — use model factory methods or repository `create_from_*()` methods
-- Never pass `json.dumps()` to `JSONType` columns — the column type handles serialization
-- Use SQLAlchemy relationships and cascading — they exist to manage parent/child persistence atomically
-- Use `JSONType` for all JSON columns (not plain `JSON`)
-- Use SQLAlchemy 2.0 patterns: `select()` + `scalars()`, not `query()`
-- Cast IDs at the boundary: JSON gives you strings, but Integer PK columns need `int` values. Write `int(x)` before passing to `.in_()` or `filter_by()`
-- All tests require PostgreSQL: `./run_all_tests.sh` runs Docker + tox (JSON reports in `test-results/`)
-- **Exception:** Bulk imports and complex reporting queries may use Core SQL/raw SQL for performance. Regular CRUD operations are never an exception.
-- **Enforced by:** `test_architecture_query_type_safety.py`, `test_architecture_repository_pattern.py`
-
-**Repository pattern:**
 ```python
-# CORRECT: repository encapsulates data access
+# _impl function — business logic, transport-agnostic
+async def _get_products_impl(
+    req: GetProductsRequest,
+    identity: ResolvedIdentity | None = None,  # NOT Context
+) -> GetProductsResponse:
+    ...  # raises AdCPError, never ToolError
+
+# MCP wrapper — resolves identity, forwards ALL params
+@mcp.tool()
+async def get_products(ctx: Context, ...) -> GetProductsResponse:
+    identity = resolve_identity(ctx.http.headers, protocol="mcp")
+    return await _get_products_impl(req=req, identity=identity)
+
+# A2A wrapper — same contract, different transport
+async def get_products_raw(...) -> GetProductsResponse:
+    identity = resolve_identity(headers, protocol="a2a")
+    return await _get_products_impl(req=req, identity=identity)
+```
+
+**Repository pattern (Pattern 3 — mandatory):**
+
+```python
 class MediaBuyRepository:
     def __init__(self, session: Session):
         self.session = session
@@ -168,542 +316,476 @@ class MediaBuyRepository:
         return self.session.scalars(
             select(MediaBuy).filter_by(media_buy_id=media_buy_id, tenant_id=tenant_id)
         ).first()
-
-    def create_from_request(self, req: CreateMediaBuyRequest, identity: ResolvedIdentity) -> MediaBuy:
-        media_buy = MediaBuy.from_request(req, identity)
-        self.session.add(media_buy)
-        return media_buy
 ```
+
+**Error handling:**
 
 ```python
-# WRONG: inline session management and raw model construction in business logic
-def _create_media_buy_impl(req, identity):
-    with get_db_session() as session:
-        mb = MediaBuy(
-            media_buy_id=generate_id(),
-            buyer_ref=req.buyer_ref,      # manual field plucking
-            tenant_id=tenant["tenant_id"], # from a dict, not even a model
-            status="pending_approval",     # magic string
-            ...
-        )
-        session.add(mb)
+from src.core.exceptions import AdCPValidationError, AdCPNotFoundError
+
+# In _impl functions — raise AdCPError subclasses
+if not product:
+    raise AdCPNotFoundError(f"Product '{product_id}' not found")
+
+# Never raise ToolError in _impl (that's transport-specific)
+# Never silently skip failures — raise or log explicitly
 ```
 
-**`_impl` functions should not contain `get_db_session()` calls.** Data access belongs in the repository layer. `_impl` functions receive repositories (or use them via dependency injection) and call typed methods.
-
-### 4. Pydantic: Explicit Nested Serialization
-Parent models must override `model_dump()` to serialize nested children:
+**Logging:**
 
 ```python
-class GetCreativesResponse(AdCPBaseModel):
-    creatives: list[Creative]
+import logging
+logger = logging.getLogger(__name__)
 
-    def model_dump(self, **kwargs):
-        result = super().model_dump(**kwargs)
-        if "creatives" in result and self.creatives:
-            result["creatives"] = [c.model_dump(**kwargs) for c in self.creatives]
-        return result
+logger.info("Processing request for tenant %s", tenant_id)
+logger.error("Adapter call failed: %s", error, exc_info=True)
+logger.warning("Deprecated field used in request")
 ```
 
-**Why**: Pydantic doesn't auto-call custom `model_dump()` on nested models.
+### Anti-Patterns to Avoid
 
-### 5. Transport Boundary: Layer Separation
-All tools have two layers: **transport wrappers** (MCP, A2A, REST) and **business logic** (`_impl` functions). The layers have strict responsibilities.
-
-**`_impl` functions** (business logic layer):
-```python
-async def _create_media_buy_impl(
-    req: CreateMediaBuyRequest,
-    push_notification_config: dict | None = None,
-    identity: ResolvedIdentity | None = None,    # NOT Context/ToolContext
-) -> CreateMediaBuyResult:
-    # Business logic only — no transport awareness
-    ...
-```
-
-**Transport wrappers** (boundary layer):
-```python
-# MCP wrapper — resolves identity, forwards ALL params to _impl
-@mcp.tool()
-async def create_media_buy(ctx: Context, ...) -> CreateMediaBuyResponse:
-    identity = resolve_identity(ctx.http.headers, protocol="mcp")
-    return await _create_media_buy_impl(req=req, identity=identity, ...)
-
-# A2A wrapper — same contract, different transport
-async def create_media_buy_raw(...) -> CreateMediaBuyResponse:
-    identity = resolve_identity(headers, protocol="a2a")
-    return await _create_media_buy_impl(req=req, identity=identity, ...)
-```
-
-**Rules for `_impl` functions:**
-- Accept `ResolvedIdentity`, never `Context`, `ToolContext`, or raw headers
-- Raise `AdCPError` subclasses, never `ToolError` (that's transport-specific)
-- Zero imports from `fastmcp`, `a2a`, `starlette`, or `fastapi`
-- No auth extraction or tenant resolution — that's the wrapper's job
-
-**Rules for transport wrappers:**
-- Call `resolve_identity()` to create `ResolvedIdentity` before calling `_impl`
-- Forward **every** `_impl` parameter — don't silently drop any
-- Catch `AdCPError` and translate to transport-appropriate error format
-
-**Enforced by:** `test_transport_agnostic_impl.py`, `test_impl_resolved_identity.py`, `test_no_toolerror_in_impl.py`, `test_architecture_boundary_completeness.py`
-
-### 6. JavaScript: Use request.script_root
-**All JS must support reverse proxy deployments:**
-
-```javascript
-const scriptRoot = '{{ request.script_root }}' || '';  // e.g., '/admin' or ''
-const apiUrl = scriptRoot + '/api/endpoint';
-fetch(apiUrl, { credentials: 'same-origin' });
-```
-
-Never hardcode `/api/endpoint` - breaks with nginx prefix.
-
-### 7. Schema Validation: Environment-Based
-- **Production**: `ENVIRONMENT=production` → `extra="ignore"` (forward compatible)
-- **Development/CI**: Default → `extra="forbid"` (strict validation)
-
-### 8. Test Fixtures: Factory-Based, Not Inline
-**MANDATORY for new integration tests:** Use `factory-boy` factories for test data, not inline `session.add()` boilerplate.
-
-```python
-# CORRECT: factory creates ORM instance with sane defaults
-from tests.factories import TenantFactory, MediaBuyFactory
-
-@pytest.fixture
-def sample_tenant(integration_db):
-    return TenantFactory.create_sync()
-
-@pytest.fixture
-def sample_media_buy(sample_tenant, sample_principal):
-    return MediaBuyFactory.create_sync(
-        tenant_id=sample_tenant.tenant_id,
-        principal_id=sample_principal.principal_id,
-    )
-```
-
-```python
-# WRONG: 20 lines of manual model construction in every test
-with get_db_session() as session:
-    tenant = Tenant(tenant_id="test", name="Test", subdomain="test", ...)
-    session.add(tenant)
-    currency = CurrencyLimit(tenant_id="test", ...)
-    session.add(currency)
-    prop = PropertyTag(tenant_id="test", ...)
-    session.add(prop)
-    session.commit()
-```
-
-**Rules:**
-- Shared fixtures (tenant, principal, products) defined once in `conftest.py` using factories
-- Test-specific data uses factory overrides, not copy-pasted setup blocks
-- Factories live in `tests/factories/` — ORM factories and Pydantic schema factories
-- Never `session.add()` in test bodies — use factories or fixtures that use factories
-- Never call `get_db_session()` in test bodies — test data setup belongs in factory fixtures
-- **DO NOT match pre-existing broken patterns.** If the test file you're adding to already uses
-  `get_db_session()` or `session.add()`, those are pre-existing debt in the allowlist. Your new
-  code must use factories regardless. The structural guard (`test_architecture_repository_pattern.py`)
-  will catch new violations immediately at `make quality`. Pre-existing violations are allowlisted
-  and tracked with FIXME comments — they shrink over time, never grow.
-
----
-
-## Project Overview
-
-Python-based Prebid Sales Agent with:
-- **MCP Server**: FastMCP tools for AI agents (via nginx at `/mcp/`)
-- **Admin UI**: Google OAuth secured interface (via nginx at `/admin/` or `/tenant/<name>`)
-- **A2A Server**: python-a2a agent-to-agent communication (via nginx at `/a2a`)
-- **Multi-Tenant**: Database-backed isolation with subdomain routing
-- **PostgreSQL**: Production-ready with Docker deployment
-
-All services are accessed through the nginx proxy at **http://localhost:8000**.
-
----
-
-## Key Patterns
-
-### SQLAlchemy 2.0 (MANDATORY for new code)
-```python
-from sqlalchemy import select
-
-# Use this
-stmt = select(Model).filter_by(field=value)
-instance = session.scalars(stmt).first()
-
-# Not this (deprecated)
-instance = session.query(Model).filter_by(field=value).first()
-```
-
-### Database JSON Fields
-```python
-from src.core.database.json_type import JSONType
-
-class MyModel(Base):
-    config: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
-```
-
-### Import Patterns
-```python
-# Always use absolute imports
-from src.core.schemas import Principal
-from src.core.database.database_session import get_db_session
-from src.adapters import get_adapter
-```
-
-### No Quiet Failures
-```python
-# ❌ WRONG - Silent failure
-if not self.supports_feature:
-    logger.warning("Skipping...")
-
-# ✅ CORRECT - Explicit failure
-if not self.supports_feature and feature_requested:
-    raise FeatureNotSupportedException("Cannot fulfill contract")
-```
-
----
-
-## Common Operations
-
-### Running Locally
-
-```bash
-# Clone and start
-git clone https://github.com/prebid/salesagent.git
-cd salesagent
-docker compose up -d      # Build and start all services
-docker compose logs -f    # View logs (Ctrl+C to exit)
-docker compose down       # Stop
-
-# Migrations run automatically on startup
-```
-
-**Access at http://localhost:8000:**
-- Admin UI: `/admin/` or `/tenant/default`
-- MCP Server: `/mcp/`
-- A2A Server: `/a2a`
-
-**Test login:** Click "Log in to Dashboard" button (password: `test123`)
-
-**Test MCP interface:**
-```bash
-uvx adcp http://localhost:8000/mcp/ --auth test-token list_tools
-```
-
-**Note:** `docker compose` builds from local source. For a clean rebuild: `docker compose build --no-cache`
-
-### Testing
-
-Test orchestration uses **tox** (with tox-uv) for parallel execution and combined coverage.
-Install: `uv tool install tox --with tox-uv`
-
-```bash
-# ─── Quick checks ───
-make quality              # Format + lint + typecheck + unit tests (before every commit)
-tox -e unit               # Unit tests only (fast, no Docker)
-
-# ─── Full suite (Docker + all 5 suites in parallel via tox) ───
-./run_all_tests.sh        # One command: starts Docker, runs tox -p, tears down
-./run_all_tests.sh quick  # No Docker: unit + integration
-
-# ─── Manual Docker lifecycle (for iterating) ───
-make test-stack-up        # Start Docker stack, writes .test-stack.env
-source .test-stack.env && tox -p   # Run all suites in parallel
-make test-stack-down      # Tear down Docker
-
-# ─── Coverage ───
-make test-cov             # Open HTML coverage report (htmlcov/index.html)
-
-# ─── Targeted runs ───
-./run_all_tests.sh ci tests/integration/test_file.py -k test_name
-tox -e integration -- -k test_name   # Pass pytest args after --
-
-# Reports: test-results/<ddmmyy_HHmm>/*.json (last 10 runs kept)
-# Coverage: htmlcov/index.html, coverage.json
-```
-
-### Database Migrations
-```bash
-uv run python scripts/ops/migrate.py            # Run migrations locally
-uv run alembic revision -m "description"        # Create migration
-
-# In Docker (migrations run automatically, but can be run manually):
-docker compose exec admin-ui python scripts/ops/migrate.py
-```
-
-**Never modify existing migrations after commit!**
-
-### Tenant Setup Dependencies
-```
-Tenant → CurrencyLimit (USD required for budget validation)
-      → PropertyTag ("all_inventory" required for property_tags references)
-      → Products (require BOTH)
-```
+| Anti-Pattern | Correct Pattern |
+|---|---|
+| `session.query(Model)` | `select(Model)` + `scalars()` (SQLAlchemy 2.0) |
+| `Column(JSON)` | `Column(JSONType)` — custom type handles serialization |
+| Hardcoded URLs in JS | `scriptRoot + '/api/endpoint'` with `{{ request.script_root }}` |
+| `ToolError` in `_impl` | `AdCPError` subclass — transport layer translates |
+| `Context` param in `_impl` | `ResolvedIdentity` — resolved at boundary |
+| `get_db_session()` in `_impl` | Repository methods — data access in repo layer |
+| `json.dumps()` for JSONType columns | Pass Python objects directly — JSONType handles it |
+| Silent failure (`logger.warning` + skip) | Raise exception if feature was requested |
+| `inspect.getsource()` in tests | Behavioral tests that exercise actual code paths |
 
 ---
 
 ## Testing Guidelines
 
-### Test Organization
-- **tests/unit/**: Fast, isolated (mock external deps only)
-- **tests/integration/**: Real PostgreSQL database
-- **tests/e2e/**: Full system tests
-- **tests/admin/**: Admin UI tests
-- **tests/bdd/**: BDD behavioral tests (pytest-bdd)
+### Test Framework
 
-### Entity Markers
-Tests are auto-tagged with entity markers by filename pattern. Use `-m` to run entity-scoped slices:
-```bash
-make test-entity ENTITY=delivery          # All delivery tests
-make test-entity ENTITY="creative"        # All creative tests
-make test-entity ENTITY="product"         # All product tests
-```
-Entities: delivery, creative, product, media_buy, tenant, auth, adapter, inventory, schema, admin, architecture, targeting, transport, workflow, policy, agent, infra.
+- **Unit**: pytest (no DB, mocks via harness `BaseTestEnv`)
+- **Integration**: pytest + real PostgreSQL (harness `IntegrationEnv`)
+- **BDD**: pytest-bdd (Gherkin features, auto-parametrized across 4 transports)
+- **E2E**: pytest (full Docker stack, no mocking)
+- **Admin**: pytest (Docker stack)
 
-### Database Fixtures
+### Test File Conventions
+
+- **Location**: `tests/{unit,integration,e2e,admin,bdd}/`
+- **Naming**: `test_<entity>_<aspect>.py` (e.g., `test_delivery_webhook.py`)
+- **Entity markers**: Auto-tagged from filename patterns (`delivery`, `creative`, `product`, etc.)
+- **BDD features**: `tests/bdd/features/BR-UC-NNN-<name>.feature`
+
+### Test Harness System (Use This for New Tests)
+
+The test harness (`tests/harness/`) manages mocks, identity, DB sessions, and transport dispatch:
+
 ```python
-# Integration tests - use integration_db
-@pytest.mark.requires_db
-def test_something(integration_db):
-    with get_db_session() as session:
-        # Test with real PostgreSQL
-        pass
+from tests.harness import DeliveryPollEnv
+from tests.factories import TenantFactory, PrincipalFactory, MediaBuyFactory
 
-# Unit tests - mock the database
-def test_something():
-    with patch('src.core.database.database_session.get_db_session') as mock_db:
-        # Test with mocked database
-        pass
+@pytest.mark.requires_db
+def test_returns_impressions(self, integration_db):
+    with DeliveryPollEnv(tenant_id="t1", principal_id="p1") as env:
+        tenant = TenantFactory(tenant_id="t1")
+        principal = PrincipalFactory(tenant=tenant, principal_id="p1")
+        buy = MediaBuyFactory(tenant=tenant, principal=principal)
+
+        env.set_adapter_response(buy.media_buy_id, impressions=5000)
+        result = env.call_impl(media_buy_ids=[buy.media_buy_id])
+
+        assert result.deliveries[0].impressions == 5000
 ```
 
-### Quality Rules
-- Max 10 mocks per test file (pre-commit enforces)
-- AdCP compliance test for all client-facing models
-- Test YOUR code, not Python built-ins
-- Roundtrip test required for any operation using `apply_testing_hooks()`
+Available environments: `DeliveryPollEnv`, `DeliveryPollEnvUnit`, `WebhookEnv`, `CircuitBreakerEnv`, `CreativeSyncEnv`, `CreativeFormatsEnv`, `CreativeListEnv`, `ProductEnv`, `ProductEnvUnit`, `MediaBuyUpdateEnv`.
+
+### Factory System (Mandatory for New Tests)
+
+All test data via `factory-boy` factories in `tests/factories/`:
+
+```python
+from tests.factories import TenantFactory, PrincipalFactory, MediaBuyFactory
+
+tenant = TenantFactory(tenant_id="t1")                    # ORM model in DB
+principal = PrincipalFactory(tenant=tenant)                # Auto-links
+buy = MediaBuyFactory(tenant=tenant, principal=principal)  # Full defaults
+identity = PrincipalFactory.make_identity(tenant_id="t1")  # ResolvedIdentity
+```
+
+### Transport Dispatching (BDD)
+
+BDD tests auto-parametrize across all 4 transports:
+
+```python
+from tests.harness.transport import Transport
+
+for transport in [Transport.IMPL, Transport.A2A, Transport.MCP, Transport.REST]:
+    result = env.call_via(transport, media_buy_ids=[buy.media_buy_id])
+    assert result.is_success
+```
 
 ### Test Integrity Policy — ZERO TOLERANCE
 
-**This is non-negotiable. Every rule below is a HARD STOP.**
-
-1. **NEVER skip, ignore, deselect, or exclude failing tests.** Do not use `--ignore`, `-k "not test_name"`, `--deselect`, `pytest.mark.skip`, or `pytest.mark.xfail` to work around failures.
-2. **NEVER rationalize failures.** Do not classify failures as "pre-existing", "infrastructure issue", "misplaced test", "needs a running server", or "was deselected in the full run". A failing test is a failing test — fix it or report it to the user as a blocker.
-3. **Start the right infrastructure.** If a test needs Docker (integration, e2e, admin), start Docker. The tooling exists — use it. See the infrastructure decision tree below.
-4. **If infrastructure is broken, STOP.** Do not skip tests and report success. Tell the user the infrastructure is broken and either fix it or ask the user to fix it.
-5. **Test results are saved as JSON** in `test-results/<ddmmyy_HHmm>/`. Review these instead of re-running the full suite. Background processes may crash and lose output — the JSON reports are the resilient record.
-
-### Test Infrastructure Decision Tree
-
-**Choose the right tool based on what you're testing:**
-
-| What you need | Command | What it starts |
-|---------------|---------|----------------|
-| Unit tests only | `make quality` | Nothing (no Docker) |
-| One integration test (iterating) | `scripts/run-test.sh tests/integration/test_foo.py -x` | Bare Postgres via agent-db (persists) |
-| Integration DB for a worktree agent | `eval $(.claude/skills/agent-db/agent-db.sh up)` | Bare Postgres (unique port per worktree) |
-| Full suite (all 5 envs) | `./run_all_tests.sh` | Full Docker stack (Postgres + app + nginx), auto-teardown |
-| Full suite, targeted | `./run_all_tests.sh ci tests/integration/test_file.py -k test_name` | Full Docker stack |
-| Quick suite (no e2e/admin) | `./run_all_tests.sh quick` | Nothing (needs pre-existing DATABASE_URL) |
-| Entity-scoped | `make test-entity ENTITY=delivery` | Nothing (runs across unit+integration+e2e+admin) |
-| Manual Docker lifecycle | `make test-stack-up` → `source .test-stack.env && tox -p` → `make test-stack-down` | Full Docker stack (stays up between runs) |
-
-**Port conflicts are not possible.** Both `test-stack.sh` and `agent-db.sh` scan for free ports in the 50000-60000 range. Multiple instances can run simultaneously.
-
-**When in doubt, use `./run_all_tests.sh`.** It handles everything: Docker up, all suites, Docker down, JSON reports saved.
+1. **NEVER** skip, ignore, deselect, or exclude failing tests
+2. **NEVER** use `session.add()` or `get_db_session()` in new test bodies — use factories/harness
+3. **NEVER** copy anti-patterns from older tests — use harness regardless of surrounding code
+4. If infrastructure is broken, STOP and report — do not skip tests
+5. Test results saved as JSON in `test-results/<ddmmyy_HHmm>/` — review these for resilient records
 
 ### Testing Workflow (Before Commit)
+
 ```bash
 # ALL changes
-make quality                           # Format + lint + typecheck + unit tests
-uv run python -c "from src.core.tools import your_import"  # Verify imports
+make quality
 
 # Refactorings (shared impl, moving code, imports)
-tox -e integration                     # Real PostgreSQL integration tests
+tox -e integration
 
 # Critical changes (protocol, schema updates)
-./run_all_tests.sh                     # Full suite: Docker + all 5 suites via tox
+./run_all_tests.sh
 ```
-
-**Pre-commit hooks can't catch import errors** - You must run tests for refactorings!
 
 ---
 
-## Development Best Practices
+## Git & Version Control
 
-### Code Style
-- Use `uv` for dependencies
-- Run `pre-commit run --all-files`
-- Use type hints
-- No hardcoded external system IDs (use config/database)
-- No testing against production systems
+### Commit Messages
 
-### Type Checking
-```bash
-uv run mypy src/core/your_file.py --config-file=mypy.ini
+**Conventional Commits** format — release-please uses these for changelogs:
+
+```
+feat: Add new feature description
+fix: Fix bug description
+docs: Update documentation
+refactor: Restructure code
+perf: Improve performance
+chore: Update dependencies
 ```
 
-When modifying code:
-1. Fix mypy errors in files you change
-2. Use SQLAlchemy 2.0 `Mapped[]` annotations for new models
-3. Use `| None` instead of `Optional[]` (Python 3.10+)
+PR titles **must** include the prefix (enforced by `pr-title-check.yml`).
+
+Recent commit examples from this repo:
+
+```
+feat: Account management, adcp 3.10 migration, and BDD test infrastructure (#1170)
+perf(ci): parallelize integration tests + local mock creative agent (#1148)
+refactor: AdapterConfigRepository + GAM service account auth consolidation (#1171)
+fix: raise on anomalous empty format responses instead of silent return [] (#1167)
+```
+
+### Branch Naming
+
+- Feature branches: `feature/<name>`
+- Never push directly to `main`
+
+### Pre-Commit Checks
+
+25+ hooks run automatically, including:
+
+| Hook | What it enforces |
+|------|------------------|
+| `enforce-sqlalchemy-2-0` | No legacy `session.query()` |
+| `enforce-jsontype` | `Column(JSONType)`, not `Column(JSON)` |
+| `no-hardcoded-urls` | JS uses `scriptRoot` |
+| `check-route-conflicts` | No duplicate Flask routes |
+| `adcp-contract-tests` | AdCP protocol compliance |
+| `check-code-duplication` | DRY — ratcheting baseline |
+| `check-migration-heads` | Single Alembic head |
+| `no-skip-tests` | No `@pytest.mark.skip` |
+| mypy | Type checking enforced on `src/` |
 
 ---
 
-## Configuration
+## Architecture & Design Patterns
 
-### Secrets (.env.secrets - REQUIRED)
+### Architectural Pattern
+
+Multi-tenant, transport-agnostic, adapter-based architecture:
+
+```
+Client (AI Agent)
+  │
+  ├── MCP (/mcp/)  ─┐
+  ├── A2A (/a2a)   ─┤── Transport Boundary ──→ _impl() ──→ Repository ──→ PostgreSQL
+  └── REST (/api/) ─┘      │                      │
+                            │                      └──→ Adapter (GAM/Mock/Broadstreet)
+                            └── resolve_identity()
+```
+
+### Transport Boundary (Critical)
+
+Every tool has 3 layers with strict responsibilities:
+
+1. **Transport wrappers** (MCP, A2A, REST): resolve identity, forward all params, translate errors
+2. **`_impl` functions**: business logic only, accept `ResolvedIdentity`, raise `AdCPError`
+3. **Repositories**: data access, SQLAlchemy ORM operations
+
+### Key Design Decisions
+
+- **`ResolvedIdentity`**: Immutable Pydantic model created at each transport boundary — eliminates `isinstance` checks in business logic
+- **`AdCPError` hierarchy**: Typed exceptions with `status_code`, `error_code`, and `recovery` hint (transient/correctable/terminal)
+- **Schema inheritance**: All schemas extend `adcp` library types — never duplicate fields
+- **Environment-aware validation**: `extra="forbid"` in dev/CI (strict), `extra="ignore"` in production (forward compatible)
+- **Repository pattern**: All DB access via repository classes — `_impl` functions never call `get_db_session()`
+- **`JSONType`**: Custom column type that handles JSON serialization — never pass `json.dumps()` to it
+- **DRY enforcement**: pylint R0801 with ratcheting baseline — duplicate count can only decrease
+
+### Adapter System
+
+```
+AdServerAdapter (ABC)
+├── MockAdServerAdapter    # Dev/testing — all AdCP pricing models
+├── GoogleAdManagerAdapter # GAM — CPM, VCPM, CPC, FLAT_RATE
+├── BroadstreetAdapter     # Broadstreet ads
+├── KevelAdapter           # Kevel
+├── TritonDigitalAdapter   # Triton Digital (audio)
+└── XandrAdapter           # Xandr
+```
+
+### Structural Guards (Automated Architecture Enforcement)
+
+AST-scanning tests enforce invariants on every `make quality`. 20+ guards including:
+
+| Guard | Enforces |
+|-------|----------|
+| No ToolError in `_impl` | `_impl` raises `AdCPError`, never `ToolError` |
+| Transport-agnostic `_impl` | Zero imports from `fastmcp`, `a2a`, `starlette`, `fastapi` |
+| `ResolvedIdentity` in `_impl` | Accepts `ResolvedIdentity`, not `Context` |
+| Schema inheritance | Schemas extend `adcp` library base types |
+| Boundary completeness | MCP/A2A wrappers forward ALL `_impl` parameters |
+| Repository pattern | No `get_db_session()` or `session.add()` outside repositories |
+| No raw `select()` outside repos | All ORM queries go through repositories |
+| No `model_dump` in `_impl` | Returns model objects, never calls `.model_dump()` |
+| Single migration head | Alembic graph has exactly one head |
+| Code duplication (DRY) | Duplicate block count cannot increase |
+
+**Rules**: Allowlists can only shrink. Every allowlisted violation has a `FIXME(salesagent-xxxx)` comment.
+
+---
+
+## Debugging & Issue Resolution
+
+### Logging
+
+Standard Python logging throughout:
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+logger.info("Processing %s for tenant %s", entity_id, tenant_id)
+logger.error("Adapter failed: %s", error, exc_info=True)
+logger.warning("Deprecated field '%s' in request", field_name)
+```
+
+### Error Handling
+
+The `AdCPError` hierarchy in `src/core/exceptions.py`:
+
+```python
+AdCPError                    # Base (500, INTERNAL_ERROR, terminal)
+├── AdCPValidationError      # 400, VALIDATION_ERROR, correctable
+├── AdCPAuthenticationError  # 401, AUTH_TOKEN_INVALID
+├── AdCPAuthorizationError   # 403, AUTHORIZATION_ERROR
+├── AdCPNotFoundError        # 404, NOT_FOUND
+│   └── AdCPAccountNotFoundError  # 404, ACCOUNT_NOT_FOUND
+├── AdCPConflictError        # 409, CONFLICT, correctable
+├── AdCPBudgetExhaustedError # 422, BUDGET_EXHAUSTED, correctable
+├── AdCPRateLimitError       # 429, RATE_LIMIT_EXCEEDED, transient
+├── AdCPAdapterError         # 502, ADAPTER_ERROR, transient
+└── AdCPServiceUnavailableError  # 503, SERVICE_UNAVAILABLE, transient
+```
+
+Transport layers translate these:
+- **FastAPI**: `@app.exception_handler(AdCPError)` → JSON response
+- **MCP**: `with_error_logging()` → `ToolError(error_code, message, recovery)`
+- **REST**: catch `ToolError` in route handlers → HTTP response
+
+### Debug Commands
+
 ```bash
-GEMINI_API_KEY=your-key
+# Check for route conflicts
+uv run python .pre-commit-hooks/check_route_conflicts.py
+
+# Verify MCP schema alignment
+uv run python scripts/hooks/validate_mcp_schemas.py
+
+# Check migration heads
+uv run python scripts/ops/check_migration_heads.py --quiet
+
+# Check code duplication
+uv run python .pre-commit-hooks/check_code_duplication.py
+
+# Verify imports
+uv run python -c "from src.core.tools.your_module import your_function"
+
+# Run a single test with auto-DB
+scripts/run-test.sh tests/integration/test_foo.py -x -v
+```
+
+---
+
+## Boundaries & Permissions
+
+### Always Do
+
+- Run `make quality` before every commit
+- Use factory-boy factories for all test data
+- Extend `adcp` library types via inheritance (never duplicate)
+- Use `ResolvedIdentity` in `_impl` functions (never `Context`)
+- Raise `AdCPError` subclasses in business logic (never `ToolError`)
+- Use SQLAlchemy 2.0 patterns (`select()` + `scalars()`)
+- Use `JSONType` for JSON columns (not plain `JSON`)
+- Use `scriptRoot` in JavaScript (not hardcoded URLs)
+- Use absolute imports (`from src.core.schemas import ...`)
+- Verify imports after refactoring: `uv run python -c "from module import thing"`
+
+### Ask First
+
+- Adding new dependencies (use `uv` to add)
+- Modifying `src/core/schemas/_base.py` or `src/core/database/models.py`
+- Creating new Alembic migrations
+- Changing adapter interfaces (`src/adapters/base.py`)
+- Modifying nginx configuration
+- Adding new structural guards
+
+### Never Do
+
+- Push directly to `main` (use feature branches + PRs)
+- Commit secrets, API keys, or credentials
+- Skip, ignore, or deselect failing tests
+- Use `session.query()` (use `select()` + `scalars()`)
+- Use `get_db_session()` in `_impl` functions or test bodies
+- Import `fastmcp`/`a2a`/`starlette`/`fastapi` in `_impl` functions
+- Modify existing migrations after they've been committed
+- Add entries to structural guard allowlists (fix violations instead)
+- Add `@pytest.mark.skip` or `pytest.mark.xfail` to tests
+- Use `inspect.getsource()` in tests
+- Bypass pre-commit hooks without justification
+
+### Files to Never Modify
+
+- `.env`, `.env.secrets` (contain secrets)
+- `alembic/versions/*.py` (existing migrations — create new ones instead)
+- `.release-please-manifest.json` (managed by release-please)
+
+### Files to Be Careful With
+
+- `src/core/schemas/_base.py` — base for all Pydantic models
+- `src/core/database/models.py` — ORM models affect migrations
+- `src/adapters/base.py` — adapter interface contract
+- `pyproject.toml` — dependencies, linting, coverage config
+- `.pre-commit-config.yaml` — hook configuration
+- `docker-compose.yml` — development environment
+- `.duplication-baseline` — DRY enforcement threshold
+
+---
+
+## Environment Setup
+
+### Required Environment Variables
+
+```bash
+# Authentication
 GOOGLE_CLIENT_ID=your-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-secret
 SUPER_ADMIN_EMAILS=user@example.com
-GAM_OAUTH_CLIENT_ID=your-gam-id.apps.googleusercontent.com
+
+# AI
+GEMINI_API_KEY=your-gemini-key
+
+# GAM (if using GAM adapter)
+GAM_OAUTH_CLIENT_ID=your-gam-id
 GAM_OAUTH_CLIENT_SECRET=your-gam-secret
-APPROXIMATED_API_KEY=your-approximated-api-key
+
+# Database (auto-configured in Docker)
+DATABASE_URL=postgresql://adcp_user:secure_password_change_me@localhost:5432/adcp
+
+# Optional
+ENVIRONMENT=production|development     # Controls schema validation strictness
+CONDUCTOR_PORT=8000                     # Override proxy port (useful for worktrees)
+CREATE_DEMO_TENANT=true                 # Create demo tenant with mock adapter
+ADCP_AUTH_TEST_MODE=true                # Enable test login (dev only)
+ENCRYPTION_KEY=...                      # For encrypting sensitive config
 ```
 
-### Database Schema
-- **Core**: tenants, principals, products, media_buys, creatives, audit_logs
-- **Workflow**: workflow_steps, object_workflow_mappings
-- **Deprecated**: tasks, human_tasks (DO NOT USE)
+### Configuration Files
 
----
+| File | Purpose |
+|------|---------|
+| `.env` | Local environment overrides |
+| `.env.secrets` | Secrets (not committed) |
+| `.env.template` | Reference for all variables |
+| `pyproject.toml` | Dependencies, ruff, black, coverage, pylint |
+| `mypy.ini` | Type checking (SQLAlchemy + Pydantic plugins) |
+| `tox.ini` | Test orchestration (5 environments) |
+| `alembic.ini` | Database migration config |
+| `.pre-commit-config.yaml` | 25+ hooks |
+| `.duplication-baseline` | DRY enforcement threshold |
+| `docker-compose.yml` | Development stack |
 
-## Adapter Support
+### Local Development Setup
 
-### GAM Adapter
-**Supported Pricing**: CPM, VCPM, CPC, FLAT_RATE
-
-- Automatic line item type selection based on pricing + guarantees
-- FLAT_RATE → SPONSORSHIP with CPD translation
-- VCPM → STANDARD only (GAM requirement)
-- See `docs/adapters/` for compatibility matrix
-
-### Mock Adapter
-**Supported**: All AdCP pricing models (CPM, VCPM, CPCV, CPP, CPC, CPV, FLAT_RATE)
-- All currencies, simulates appropriate metrics
-- Used for testing and development
-
----
-
-## Deployment
-
-### Environments
-- **Local Dev**: `docker compose up -d` → http://localhost:8000 (builds from source)
-- **Production**: Deploy to your preferred hosting platform
-
-**Local Dev Notes:**
-- Test mode enabled by default (`ADCP_AUTH_TEST_MODE=true`)
-- Test credentials: Click "Log in to Dashboard" button (password: `test123`)
-
-### Git Workflow (MANDATORY)
-**Never push directly to main**
-
-1. Work on feature branches: `git checkout -b feature/name`
-2. Create PR: `gh pr create`
-3. Merge via GitHub UI
-
-### Hosting Options
-This app can be hosted anywhere:
-- Docker (recommended) - Any Docker-compatible platform
-- Kubernetes - Full k8s manifests supported
-- Cloud Providers - AWS, GCP, Azure, DigitalOcean
-- Platform Services - Fly.io, Heroku, Railway, Render
-
-See `docs/deployment.md` for platform-specific guides.
-
----
-
-## Documentation
-
-**Detailed docs in `/docs`:**
-- `ARCHITECTURE.md` - System architecture
-- `SETUP.md` - Initial setup guide
-- `DEVELOPMENT.md` - Development workflow
-- `testing/` - Testing patterns and case studies
-- `TROUBLESHOOTING.md` - Common issues
-- `security.md` - Security guidelines
-- `deployment.md` - Deployment guides
-- `adapters/` - Adapter-specific documentation
-
----
-
-## Quick Reference
-
-### MCP Client
-```python
-from fastmcp.client import Client
-from fastmcp.client.transports import StreamableHttpTransport
-
-headers = {"x-adcp-auth": "your_token"}
-transport = StreamableHttpTransport(url="http://localhost:8000/mcp/", headers=headers)
-client = Client(transport=transport)
-
-async with client:
-    products = await client.tools.get_products(brief="video ads")
-    result = await client.tools.create_media_buy(product_ids=["prod_1"], ...)
-```
-
-### CLI Testing
 ```bash
-# List available tools
+# 1. Clone and setup
+git clone https://github.com/prebid/salesagent.git
+cd salesagent
+
+# 2. One-command setup (installs deps, starts Docker, verifies health)
+make setup
+
+# 3. Or manual:
+uv sync --frozen
+docker compose up -d
+# Wait for health check, then access http://localhost:8000
+
+# 4. Test login: click "Log in to Dashboard" → password: test123
+
+# 5. Test MCP interface:
 uvx adcp http://localhost:8000/mcp/ --auth test-token list_tools
-
-# Get a real token from Admin UI → Advertisers → API Token
-uvx adcp http://localhost:8000/mcp/ --auth <real-token> get_products '{"brief":"video"}'
 ```
-
-### Admin UI
-- Local: http://localhost:8000/admin/ (or `/tenant/default`)
-- Production: Configure based on your hosting
 
 ---
 
-## Decision Tree for Claude
+## Decision Tree
 
-**User asks to add a new feature:**
-1. Search existing code: `Glob` for similar features
-2. Read relevant files to understand patterns
-3. Design solution following critical patterns
-4. Write tests first (TDD)
-5. Implement feature
-6. Run tests: `make quality`
-7. Commit with clear message
+### Adding a New AdCP Tool
 
-**User reports a bug:**
-1. Reproduce: Read the code path
-2. Write failing test that demonstrates bug
+1. Extend `adcp` library schema in `src/core/schemas/` (Pattern 1)
+2. Add `_impl()` function in `src/core/tools/` (Pattern 5)
+3. Add MCP wrapper in `src/core/main.py` via `mcp.tool()(with_error_logging(fn))`
+4. Add A2A `*_raw` wrapper in the same tools module
+5. Add tests (unit with harness, integration with factories, BDD feature)
+6. Run `pytest tests/unit/test_adcp_contract.py` to verify AdCP compliance
+7. Run `make quality` to verify all guards pass
+
+### Fixing a Bug
+
+1. Read the code path
+2. Write a failing test using harness/factories
 3. Fix the code
-4. Verify test passes
+4. Run `make quality`
 5. Check for similar issues in codebase
-6. Commit fix with test
 
-**User asks "how does X work?"**
-1. Search for X: Use `Grep` to find relevant code
-2. Read the implementation
-3. Check tests for examples: `tests/unit/test_*X*.py`
-4. Explain with code references (file:line)
-5. Link to relevant docs if they exist
+### Modifying Schemas
 
-**User asks to refactor code:**
+1. Verify against AdCP spec (`adcp` library types)
+2. Update Pydantic model (extend library type with inheritance)
+3. Run `pytest tests/unit/test_adcp_contract.py`
+4. Run `make quality`
+
+### Database Changes
+
+1. Use SQLAlchemy 2.0 `select()` + `scalars()`
+2. Use `JSONType` for JSON columns
+3. Add repository methods for new queries
+4. Create migration: `uv run alembic revision -m "description"`
+5. Test migration: `uv run python scripts/ops/migrate.py`
+6. Run `make quality` + integration tests
+
+### Refactoring
+
 1. Verify tests exist and pass
 2. Make small, incremental changes
-3. Run tests after each change: `make quality`
-4. For import changes, verify: `uv run python -c "from module import thing"`
-5. For shared implementations, run integration tests: `tox -e integration`
-
-**User asks about best practices:**
-1. Check this CLAUDE.md for patterns
-2. Check `/docs` for detailed guidelines
-3. Look at recent code for current conventions
-4. When in doubt, follow the 7 critical patterns above
-
----
-
-## Support
-
-- Documentation: `/docs` directory
-- Test examples: `/tests` directory
-- Adapter implementations: `/src/adapters` directory
-- Issues: File on GitHub repository
+3. Run `make quality` after each change
+4. Verify imports: `uv run python -c "from module import thing"`
+5. For shared implementations: `tox -e integration`

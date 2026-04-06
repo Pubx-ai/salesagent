@@ -166,7 +166,7 @@ context_mgr = ContextManager()
 # --- Adapter Configuration ---
 # Get adapter from config, fallback to mock
 SELECTED_ADAPTER = ((config.get("ad_server", {}).get("adapter") or "mock") if config else "mock").lower()
-AVAILABLE_ADAPTERS = ["mock", "gam", "kevel", "triton", "triton_digital"]
+AVAILABLE_ADAPTERS = ["mock", "gam", "kevel", "triton", "triton_digital", "curation"]
 
 # --- In-Memory State (already initialized above, just adding context_map) ---
 context_map: dict[str, str] = {}  # Maps context_id to media_buy_id
