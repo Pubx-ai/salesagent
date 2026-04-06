@@ -1,0 +1,204 @@
+{#
+Curation Adapter Connection Configuration Template
+
+This template is included in the settings page when the Curation adapter is selected.
+It provides form fields for CurationConnectionConfig schema fields.
+
+Expected context variables:
+- adapter_config: dict with current adapter configuration (from config_json)
+- tenant_id: current tenant ID
+- scriptRoot: URL prefix for reverse proxy support
+#}
+
+<div class="adapter-connection-config" data-adapter-type="curation">
+    <div class="form-section">
+        <h3>Curation Services Configuration</h3>
+        <p class="text-muted" style="margin-bottom: 1.5rem;">
+            Connect to your external Catalog, Sales, and Activation services.
+            These services manage audience segments, deal records, and SSP activations respectively.
+        </p>
+
+        <div class="status-card" style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 1rem; margin-bottom: 1.5rem;">
+            <h4 style="margin: 0 0 0.5rem 0;">External Services</h4>
+            <p style="margin: 0; font-size: 0.875rem;">
+                The curation adapter delegates all data persistence to external services.
+                No data is stored in the Prebid Sales Agent database for this adapter.
+            </p>
+        </div>
+
+        <h4 style="margin-top: 1.5rem; margin-bottom: 1rem;">Service URLs</h4>
+
+        <div class="form-group">
+            <label for="curation_catalog_url">Catalog Service URL *</label>
+            <input type="url" id="curation_catalog_url" name="curation_catalog_url"
+                   value="{{ adapter_config.get('catalog_service_url', 'http://localhost:8000') if adapter_config else 'http://localhost:8000' }}"
+                   placeholder="http://localhost:8000"
+                   required>
+            <small class="form-text text-muted">
+                Base URL of the Curation Catalog service that provides audience segments.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="curation_sales_url">Sales Service URL *</label>
+            <input type="url" id="curation_sales_url" name="curation_sales_url"
+                   value="{{ adapter_config.get('sales_service_url', 'http://localhost:8001') if adapter_config else 'http://localhost:8001' }}"
+                   placeholder="http://localhost:8001"
+                   required>
+            <small class="form-text text-muted">
+                Base URL of the Curation Sales service that manages sale/deal records.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="curation_activation_url">Activation Service URL *</label>
+            <input type="url" id="curation_activation_url" name="curation_activation_url"
+                   value="{{ adapter_config.get('activation_service_url', 'http://localhost:8002') if adapter_config else 'http://localhost:8002' }}"
+                   placeholder="http://localhost:8002"
+                   required>
+            <small class="form-text text-muted">
+                Base URL of the Curation Activation service that triggers SSP deals.
+            </small>
+        </div>
+
+        <h4 style="margin-top: 2rem; margin-bottom: 1rem;">Pricing Configuration</h4>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+            <div class="form-group">
+                <label for="curation_pricing_multiplier">Pricing Multiplier</label>
+                <input type="number" id="curation_pricing_multiplier" name="curation_pricing_multiplier"
+                       value="{{ adapter_config.get('pricing_multiplier', 5) if adapter_config else 5 }}"
+                       step="0.1" min="0.1">
+                <small class="form-text text-muted">
+                    Multiplier applied to base CPM.
+                </small>
+            </div>
+
+            <div class="form-group">
+                <label for="curation_pricing_floor">Floor CPM ($)</label>
+                <input type="number" id="curation_pricing_floor" name="curation_pricing_floor"
+                       value="{{ adapter_config.get('pricing_floor_cpm', 0.1) if adapter_config else 0.1 }}"
+                       step="0.01" min="0.01">
+                <small class="form-text text-muted">
+                    Minimum floor CPM for all segments.
+                </small>
+            </div>
+
+            <div class="form-group">
+                <label for="curation_pricing_max">Max Suggested CPM ($)</label>
+                <input type="number" id="curation_pricing_max" name="curation_pricing_max"
+                       value="{{ adapter_config.get('pricing_max_suggested_cpm', 10) if adapter_config else 10 }}"
+                       step="0.5" min="0.1">
+                <small class="form-text text-muted">
+                    Cap on the suggested CPM.
+                </small>
+            </div>
+        </div>
+
+        <h4 style="margin-top: 2rem; margin-bottom: 1rem;">Advanced</h4>
+
+        <div class="form-group">
+            <label for="curation_http_timeout">HTTP Timeout (seconds)</label>
+            <input type="number" id="curation_http_timeout" name="curation_http_timeout"
+                   value="{{ adapter_config.get('http_timeout_seconds', 30) if adapter_config else 30 }}"
+                   step="1" min="5" max="120">
+            <small class="form-text text-muted">
+                Request timeout for calls to curation services.
+            </small>
+        </div>
+
+        <div style="margin-top: 1.5rem; display: flex; gap: 1rem; align-items: center;">
+            <button type="button" onclick="saveCurationConfig()" class="btn btn-primary">
+                Save Configuration
+            </button>
+            <button type="button" onclick="testCurationConnection()" class="btn btn-secondary">
+                Test Connection
+            </button>
+            <span id="curation-connection-status"></span>
+        </div>
+    </div>
+</div>
+
+<script>
+function saveCurationConfig() {
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+    const config = {
+        catalog_service_url: document.getElementById('curation_catalog_url').value,
+        sales_service_url: document.getElementById('curation_sales_url').value,
+        activation_service_url: document.getElementById('curation_activation_url').value,
+        pricing_multiplier: parseFloat(document.getElementById('curation_pricing_multiplier').value) || 5,
+        pricing_floor_cpm: parseFloat(document.getElementById('curation_pricing_floor').value) || 0.1,
+        pricing_max_suggested_cpm: parseFloat(document.getElementById('curation_pricing_max').value) || 10,
+        http_timeout_seconds: parseFloat(document.getElementById('curation_http_timeout').value) || 30
+    };
+
+    if (!config.catalog_service_url || !config.sales_service_url || !config.activation_service_url) {
+        showNotification('All three service URLs are required', 'error');
+        return;
+    }
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapter-config', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+            adapter_type: 'curation',
+            config: config
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showNotification('Curation configuration saved successfully', 'success');
+        } else {
+            showNotification('Failed to save: ' + (data.error || 'Unknown error'), 'error');
+        }
+    })
+    .catch(error => {
+        showNotification('Error saving configuration: ' + error.message, 'error');
+    });
+}
+
+function testCurationConnection() {
+    const statusEl = document.getElementById('curation-connection-status');
+    const catalogUrl = document.getElementById('curation_catalog_url').value;
+
+    if (!catalogUrl) {
+        showNotification('Catalog Service URL is required to test connection', 'error');
+        return;
+    }
+
+    statusEl.innerHTML = '<span style="color: #6b7280;">Testing Catalog connection...</span>';
+
+    const scriptRoot = '{{ request.script_root }}' || '';
+    const tenantId = '{{ tenant_id }}';
+
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapters/curation/test-connection', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+            catalog_service_url: catalogUrl,
+            sales_service_url: document.getElementById('curation_sales_url').value,
+            activation_service_url: document.getElementById('curation_activation_url').value
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const segCount = data.segment_count !== undefined ? ' (' + data.segment_count + ' segments)' : '';
+            statusEl.innerHTML = '<span style="color: #10b981;">\u2713 Connected' + segCount + '</span>';
+        } else {
+            statusEl.innerHTML = '<span style="color: #ef4444;">\u2717 ' + (data.error || 'Connection failed') + '</span>';
+        }
+    })
+    .catch(error => {
+        statusEl.innerHTML = '<span style="color: #ef4444;">\u2717 Error: ' + error.message + '</span>';
+    });
+}
+</script>

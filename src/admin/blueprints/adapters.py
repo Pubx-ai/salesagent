@@ -305,3 +305,74 @@ def list_broadstreet_zones(tenant_id, **kwargs):
     except Exception as e:
         logger.error(f"Error fetching Broadstreet zones: {e}", exc_info=True)
         return jsonify({"zones": [], "error": str(e)}), 500
+
+
+@adapters_bp.route("/api/tenant/<tenant_id>/adapters/curation/test-connection", methods=["POST"])
+@require_tenant_access()
+def test_curation_connection(tenant_id, **kwargs):
+    """Test connectivity to all three curation services."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
+
+        catalog_url = data.get("catalog_service_url")
+        sales_url = data.get("sales_service_url")
+        activation_url = data.get("activation_service_url")
+
+        if not catalog_url:
+            return jsonify({"success": False, "error": "catalog_service_url is required"}), 400
+
+        import httpx
+
+        results: dict = {}
+        segment_count: int | None = None
+
+        # Test catalog
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.get(f"{catalog_url.rstrip('/')}/segments", params={"limit": 1})
+                resp.raise_for_status()
+                body = resp.json()
+                segment_count = len(body.get("items", []))
+                results["catalog"] = "ok"
+        except Exception as e:
+            results["catalog"] = str(e)
+
+        # Test sales
+        if sales_url:
+            try:
+                with httpx.Client(timeout=10) as client:
+                    resp = client.get(f"{sales_url.rstrip('/')}/api/v1/sales", params={"limit": 1})
+                    if resp.status_code < 500:
+                        results["sales"] = "ok"
+                    else:
+                        results["sales"] = f"HTTP {resp.status_code}"
+            except Exception as e:
+                results["sales"] = str(e)
+
+        # Test activation
+        if activation_url:
+            try:
+                with httpx.Client(timeout=10) as client:
+                    resp = client.get(f"{activation_url.rstrip('/')}/activations", params={"limit": 1})
+                    if resp.status_code < 500:
+                        results["activation"] = "ok"
+                    else:
+                        results["activation"] = f"HTTP {resp.status_code}"
+            except Exception as e:
+                results["activation"] = str(e)
+
+        all_ok = all(v == "ok" for v in results.values())
+        return jsonify(
+            {
+                "success": all_ok,
+                "services": results,
+                "segment_count": segment_count,
+                **({"error": "Some services unreachable"} if not all_ok else {}),
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Curation connection test failed: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500

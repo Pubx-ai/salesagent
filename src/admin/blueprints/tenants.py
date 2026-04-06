@@ -283,6 +283,8 @@ def tenant_settings(tenant_id, section=None):
                     "secondary_currencies": adapter_config_obj.gam_secondary_currencies or [],
                     "network_timezone": adapter_config_obj.gam_network_timezone or "",
                 }
+                if adapter_config_obj.config_json and isinstance(adapter_config_obj.config_json, dict):
+                    adapter_config_dict.update(adapter_config_obj.config_json)
 
             # Get environment info for URL generation
             is_production = os.environ.get("PRODUCTION") == "true"
