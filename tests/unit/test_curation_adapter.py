@@ -389,13 +389,15 @@ class TestCurationAdapterInterface:
     def test_supported_pricing_models(self, adapter):
         assert adapter.get_supported_pricing_models() == {"cpm"}
 
-    def test_creative_assets_noop(self, adapter):
-        result = adapter.add_creative_assets("mb-1", [], datetime.now(UTC))
-        assert result == []
+    def test_no_creative_methods(self, adapter):
+        assert not hasattr(adapter, "add_creative_assets")
+        assert not hasattr(adapter, "associate_creatives")
 
-    def test_associate_creatives_noop(self, adapter):
-        result = adapter.associate_creatives([], [])
-        assert result == []
+    def test_extends_tool_provider_not_ad_server_adapter(self, adapter):
+        from src.adapters.base import AdServerAdapter, ToolProvider
+
+        assert isinstance(adapter, ToolProvider)
+        assert not isinstance(adapter, AdServerAdapter)
 
     def test_performance_index_noop(self, adapter):
         result = adapter.update_media_buy_performance_index("mb-1", [])
@@ -652,12 +654,13 @@ class TestStatusMapping:
         assert SALE_STATUS_TO_ADCP["completed"] == "completed"
         assert SALE_STATUS_TO_ADCP["failed"] == "failed"
 
-    def test_activation_status_to_adcp(self):
-        from src.adapters.curation.adapter import ACTIVATION_STATUS_TO_ADCP
+    def test_sale_status_covers_all_states(self):
+        from src.adapters.curation.adapter import SALE_STATUS_TO_ADCP
 
-        assert ACTIVATION_STATUS_TO_ADCP["active"] == "active"
-        assert ACTIVATION_STATUS_TO_ADCP["pending"] == "pending_activation"
-        assert ACTIVATION_STATUS_TO_ADCP["error"] == "failed"
+        assert "canceled" in SALE_STATUS_TO_ADCP
+        assert "rejected" in SALE_STATUS_TO_ADCP
+        assert SALE_STATUS_TO_ADCP["canceled"] == "completed"
+        assert SALE_STATUS_TO_ADCP["rejected"] == "failed"
 
     def test_action_to_adcp_status(self):
         from src.adapters.curation.adapter import ACTION_TO_ADCP_STATUS

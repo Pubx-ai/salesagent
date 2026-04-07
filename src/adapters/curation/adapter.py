@@ -1,21 +1,25 @@
-"""CurationAdapter -- bridges AdServerAdapter to external curation services.
+"""CurationAdapter -- bridges ToolProvider to external curation services.
 
 This adapter is the sole source of truth for curation tenants.
 No data is persisted in the Prebid Sales Agent PostgreSQL database.
+
+Extends ToolProvider directly (not AdServerAdapter) because curation
+is not an ad server -- it manages audience segments, sale records,
+and SSP deal activations via external HTTP services.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from adcp.types.aliases import Package as ResponsePackage
 
 from src.adapters.base import (
     AdapterCapabilities,
-    AdServerAdapter,
-    BaseProductConfig,
-    CreativeEngineAdapter,
-    TargetingCapabilities,
+    BaseConnectionConfig,
+    ToolProvider,
 )
 from src.adapters.curation.activation_client import ActivationClient
 from src.adapters.curation.catalog_client import CatalogClient
@@ -25,10 +29,10 @@ from src.adapters.curation.segment_converter import segments_to_products
 from src.core.exceptions import AdCPAdapterError
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
-    AssetStatus,
     CheckMediaBuyStatusResponse,
     CreateMediaBuyRequest,
     CreateMediaBuyResponse,
+    CreateMediaBuySuccess,
     DeliveryTotals,
     MediaPackage,
     PackagePerformance,
@@ -40,14 +44,6 @@ from src.core.schemas import (
 from src.core.schemas.product import Product
 
 logger = logging.getLogger(__name__)
-
-ACTIVATION_STATUS_TO_ADCP = {
-    "pending": "pending_activation",
-    "active": "active",
-    "paused": "paused",
-    "error": "failed",
-    "inactive": "completed",
-}
 
 SALE_STATUS_TO_ADCP = {
     "pending_approval": "pending_activation",
@@ -67,7 +63,7 @@ ACTION_TO_ADCP_STATUS = {
 }
 
 
-class CurationAdapter(AdServerAdapter):
+class CurationAdapter(ToolProvider):
     """Adapter bridging AdCP tools to external curation services.
 
     Instead of managing line items on an ad server, this adapter:
@@ -82,8 +78,7 @@ class CurationAdapter(AdServerAdapter):
     default_channels = ["display"]
     default_delivery_measurement = {"provider": "curation"}
 
-    connection_config_class = CurationConnectionConfig
-    product_config_class: type[BaseProductConfig] | None = None
+    connection_config_class: type[BaseConnectionConfig] | None = CurationConnectionConfig
 
     capabilities = AdapterCapabilities(
         supports_inventory_sync=False,
@@ -102,10 +97,19 @@ class CurationAdapter(AdServerAdapter):
         config: dict[str, Any],
         principal: Principal,
         dry_run: bool = False,
-        creative_engine: CreativeEngineAdapter | None = None,
+        creative_engine: Any = None,
         tenant_id: str | None = None,
     ):
-        super().__init__(config, principal, dry_run, creative_engine, tenant_id)
+        if not tenant_id:
+            raise ValueError("tenant_id is required for CurationAdapter initialization.")
+
+        self.config = config
+        self.principal = principal
+        self.dry_run = dry_run
+        self.tenant_id = tenant_id
+
+        self.manual_approval_required = config.get("manual_approval_required", False)
+        self.manual_approval_operations: set[str] = set(config.get("manual_approval_operations", []))
 
         conn = CurationConnectionConfig(
             **{k: v for k, v in config.items() if k in CurationConnectionConfig.model_fields}
@@ -134,15 +138,7 @@ class CurationAdapter(AdServerAdapter):
             publisher_domain=self._publisher_domain,
         )
 
-    # ── Pricing ────────────────────────────────────────────────────────
-
-    def get_supported_pricing_models(self) -> set[str]:
-        return {"cpm"}
-
-    def get_targeting_capabilities(self) -> TargetingCapabilities:
-        return TargetingCapabilities(geo_countries=False)
-
-    # ── Create media buy ───────────────────────────────────────────────
+    # ── Create media buy (sale + activation) ───────────────────────────
 
     def create_media_buy(
         self,
@@ -179,14 +175,12 @@ class CurationAdapter(AdServerAdapter):
         if budget is not None:
             sale_data["budget"] = float(budget)
 
-        # Step 1: Create sale
         sale_resp = self._sales.create_sale(sale_data)
         sale_id = sale_resp.get("sale_id")
         if not sale_id:
             raise AdCPAdapterError("Sales service did not return a sale_id")
         logger.info("Created sale %s in Sales service", sale_id)
 
-        # Step 2: Trigger activation
         ssp_deal_id: str | None = None
         try:
             activation_price = pricing_info.get("fixed_price") or pricing_info.get("floor_price") or 0
@@ -207,7 +201,6 @@ class CurationAdapter(AdServerAdapter):
         except Exception:
             logger.exception("Activation failed for sale %s, deal will be pending_activation", sale_id)
 
-        # Step 3: Update sale status if activation succeeded
         if ssp_deal_id:
             try:
                 self._sales.update_sale(
@@ -228,11 +221,17 @@ class CurationAdapter(AdServerAdapter):
             except Exception:
                 logger.warning("Failed to update sale %s status after activation", sale_id, exc_info=True)
 
-        return self._build_create_success(
-            request,
-            sale_id,
-            packages,
-            paused=ssp_deal_id is None,
+        pkg_responses = [
+            ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=ssp_deal_id is None)
+            for p in packages
+        ]
+        creative_deadline = datetime.now(UTC) + timedelta(days=2)
+
+        return CreateMediaBuySuccess(
+            buyer_ref=request.buyer_ref or "unknown",
+            media_buy_id=sale_id,
+            creative_deadline=creative_deadline,
+            packages=pkg_responses,
         )
 
     # ── Check status ───────────────────────────────────────────────────
@@ -256,9 +255,7 @@ class CurationAdapter(AdServerAdapter):
         date_range: ReportingPeriod,
         today: datetime,
     ) -> AdapterGetMediaBuyDeliveryResponse:
-        sale = self._sales.get_sale(media_buy_id)
-        raw_status = sale.get("status", "pending_activation")
-        adcp_status = SALE_STATUS_TO_ADCP.get(raw_status, "pending_activation")
+        self._sales.get_sale(media_buy_id)
 
         return AdapterGetMediaBuyDeliveryResponse(
             media_buy_id=media_buy_id,
@@ -312,16 +309,6 @@ class CurationAdapter(AdServerAdapter):
         self, media_buy_id: str, package_performance: list[PackagePerformance]
     ) -> bool:
         return True
-
-    # ── Creative management (not applicable for curation deals) ────────
-
-    def add_creative_assets(
-        self, media_buy_id: str, assets: list[dict[str, Any]], today: datetime
-    ) -> list[AssetStatus]:
-        return []
-
-    def associate_creatives(self, line_item_ids: list[str], platform_creative_ids: list[str]) -> list[dict[str, Any]]:
-        return []
 
 
 def _extract_pricing(package_pricing_info: dict[str, dict] | None) -> dict[str, Any]:

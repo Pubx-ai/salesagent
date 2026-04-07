@@ -44,7 +44,7 @@ def build_agent_config(agent: _HasAgentFields) -> AgentConfig:
     )
 
 
-from src.adapters.base import AdServerAdapter
+from src.adapters.base import ToolProvider
 from src.adapters.google_ad_manager import GoogleAdManager
 from src.adapters.kevel import Kevel
 from src.adapters.mock_ad_server import MockAdServer as MockAdServerAdapter
@@ -55,7 +55,7 @@ from src.core.schemas import Principal
 
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
-) -> AdServerAdapter:
+) -> ToolProvider:
     """Get the appropriate adapter instance for the selected adapter type.
 
     Args:

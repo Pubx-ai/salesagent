@@ -3383,8 +3383,8 @@ async def _create_media_buy_impl(
                                             },
                                         )
 
-                                    # Upload to GAM using adapter's add_creative_assets method
-                                    upload_result = adapter.add_creative_assets(
+                                    # Upload using adapter's add_creative_assets method (ad server adapters only)
+                                    upload_result = adapter.add_creative_assets(  # type: ignore[attr-defined]
                                         response.media_buy_id if response.media_buy_id else "",
                                         [asset],
                                         datetime.now(UTC),
@@ -3441,7 +3441,7 @@ async def _create_media_buy_impl(
                                 logger.info(
                                     f"[cyan]Associating {len(platform_creative_ids)} pre-synced creatives with line item {platform_line_item_id}[/cyan]"
                                 )
-                                association_results = adapter.associate_creatives(
+                                association_results = adapter.associate_creatives(  # type: ignore[attr-defined]
                                     [platform_line_item_id], platform_creative_ids
                                 )
 
@@ -3487,7 +3487,7 @@ async def _create_media_buy_impl(
                         creative_id=creative.creative_id, status="rejected", detail=f"Conversion error: {str(e)}"
                     )
                     continue
-            statuses = adapter.add_creative_assets(response.media_buy_id, assets, datetime.now(UTC))
+            statuses = adapter.add_creative_assets(response.media_buy_id, assets, datetime.now(UTC))  # type: ignore[attr-defined]
 
             # Check if manual approval is required for creatives
             require_creative_approval = manual_approval_required and "add_creative_assets" in manual_approval_operations

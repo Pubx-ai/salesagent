@@ -286,6 +286,16 @@ def tenant_settings(tenant_id, section=None):
                 if adapter_config_obj.config_json and isinstance(adapter_config_obj.config_json, dict):
                     adapter_config_dict.update(adapter_config_obj.config_json)
 
+            # Add AI config info for the curation adapter UI
+            ai_config = tenant.ai_config or {}
+            if ai_config.get("provider"):
+                adapter_config_dict["ai_provider"] = ai_config["provider"]
+            if ai_config.get("model"):
+                adapter_config_dict["ai_model"] = ai_config["model"]
+            adapter_config_dict["ai_api_key_set"] = bool(
+                ai_config.get("api_key") or tenant.gemini_api_key or os.environ.get("GEMINI_API_KEY")
+            )
+
             # Get environment info for URL generation
             is_production = os.environ.get("PRODUCTION") == "true"
             mcp_port = int(os.environ.get("ADCP_SALES_PORT", 8080)) if not is_production else None
