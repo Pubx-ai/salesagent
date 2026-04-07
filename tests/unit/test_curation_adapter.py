@@ -19,23 +19,31 @@ import pytest
 
 
 SAMPLE_SEGMENT = {
-    "name": "auto_intenders",
+    "name": "Premium Apple Prime",
     "segment_id": "seg-uuid-123",
-    "description": "Automotive purchase intenders",
-    "rule": {"type": "cel", "expression": "signals.auto > 0.5"},
-    "rule_type": "cel",
+    "description": "Apple device users in the US and UK during prime-time hours",
+    "rule": {"cel_rule": "country IN ['US','GB'] && platform IN ['ios','macos'] && hour >= 18 && hour <= 23"},
+    "rule_type": "CEL",
     "metadata": {
         "estimation": {
-            "avg_daily_cpm": 1.5,
-            "avg_daily_impressions": 50000,
-            "total_impressions_7d": 350000,
-        }
+            "avg_daily_cpm": 0.59,
+            "avg_daily_impressions": 41000000,
+            "total_impressions_7d": 287000000,
+            "unique_sites": 1315,
+            "lookback_days": 7,
+            "days_with_data": 14,
+            "sampling_applied": True,
+            "error": None,
+            "estimated_at": "2026-02-19T00:00:00Z",
+        },
+        "signals_used": ["country", "platform", "hour"],
+        "domains": ["pubx.ai RON"],
     },
-    "version": 1,
+    "version": 2,
     "status": "prod",
-    "owner": "admin",
-    "created_at": "2024-01-01T00:00:00Z",
-    "updated_at": "2024-01-01T00:00:00Z",
+    "owner": "DS-Team",
+    "created_at": "2026-02-20T13:17:56Z",
+    "updated_at": "2026-04-06T11:03:34Z",
     "schema_hash": "abc123",
 }
 
@@ -43,6 +51,25 @@ SAMPLE_SEGMENT = {
 MINIMAL_SEGMENT = {
     "name": "minimal_seg",
     "description": "A minimal segment",
+}
+
+NON_VIABLE_SEGMENT = {
+    "name": "broken_segment",
+    "segment_id": "seg-broken",
+    "description": "Segment with estimation error and zero impressions",
+    "rule": {"cel_rule": "interests in ['sports']"},
+    "rule_type": "CEL",
+    "metadata": {
+        "estimation": {
+            "avg_daily_cpm": 0,
+            "avg_daily_impressions": 0,
+            "total_impressions_7d": 0,
+            "error": "Signal 'interests' requires ConceptX data (not available in v1)",
+        }
+    },
+    "version": 1,
+    "status": "prod",
+    "owner": "admin",
 }
 
 
@@ -53,8 +80,8 @@ class TestSegmentToProduct:
         product = segment_to_product(SAMPLE_SEGMENT)
 
         assert product.product_id == "seg-uuid-123"
-        assert product.name == "auto_intenders"
-        assert product.description == "Automotive purchase intenders"
+        assert product.name == "Premium Apple Prime"
+        assert "Apple device users" in product.description
         assert str(product.delivery_type.value) == "non_guaranteed"
         assert len(product.pricing_options) == 1
         assert len(product.publisher_properties) == 1
@@ -75,6 +102,59 @@ class TestSegmentToProduct:
         po = product.pricing_options[0].root
         assert po.floor_price == 0.99
 
+    def test_price_guidance_from_estimation(self):
+        from src.adapters.curation.segment_converter import segment_to_product
+
+        product = segment_to_product(SAMPLE_SEGMENT, pricing_multiplier=5.0, pricing_max_suggested_cpm=10.0)
+
+        po = product.pricing_options[0].root
+        assert po.price_guidance is not None
+        assert po.price_guidance.p50 == 0.59
+        assert po.price_guidance.recommended == 2.95
+
+    def test_countries_extracted_from_cel(self):
+        from src.adapters.curation.segment_converter import segment_to_product
+
+        product = segment_to_product(SAMPLE_SEGMENT)
+
+        assert sorted(product.countries) == ["GB", "US"]
+
+    def test_device_types_extracted_from_cel(self):
+        from src.adapters.curation.segment_converter import segment_to_product
+
+        product = segment_to_product(SAMPLE_SEGMENT)
+
+        assert product.device_types is not None
+        assert "desktop" in product.device_types
+        assert "mobile" in product.device_types
+
+    def test_forecast_from_estimation(self):
+        from src.adapters.curation.segment_converter import segment_to_product
+
+        product = segment_to_product(SAMPLE_SEGMENT)
+
+        assert product.forecast is not None
+        assert len(product.forecast.points) == 1
+        assert product.forecast.points[0].metrics.impressions.mid == 41000000.0
+
+    def test_ext_contains_metadata(self):
+        from src.adapters.curation.segment_converter import segment_to_product
+
+        product = segment_to_product(SAMPLE_SEGMENT)
+
+        assert product.ext is not None
+        ext = product.ext if isinstance(product.ext, dict) else product.ext.model_dump()
+        assert ext["signals_used"] == ["country", "platform", "hour"]
+        assert ext["domains"] == ["pubx.ai RON"]
+        assert ext["unique_sites"] == 1315
+        assert ext["owner"] == "DS-Team"
+
+    def test_non_viable_segment_returns_none(self):
+        from src.adapters.curation.segment_converter import segment_to_product
+
+        result = segment_to_product(NON_VIABLE_SEGMENT)
+        assert result is None
+
     def test_minimal_segment_uses_fallback_name(self):
         from src.adapters.curation.segment_converter import segment_to_product
 
@@ -83,13 +163,16 @@ class TestSegmentToProduct:
         assert product.product_id == "minimal_seg"
         assert product.name == "minimal_seg"
 
-    def test_segments_to_products_skips_invalid(self):
+    def test_segments_to_products_filters_non_viable(self):
         from src.adapters.curation.segment_converter import segments_to_products
 
-        segments = [SAMPLE_SEGMENT, MINIMAL_SEGMENT]
+        segments = [SAMPLE_SEGMENT, NON_VIABLE_SEGMENT, MINIMAL_SEGMENT]
         products = segments_to_products(segments)
 
         assert len(products) == 2
+        ids = {p.product_id for p in products}
+        assert "seg-uuid-123" in ids
+        assert "minimal_seg" in ids
 
     def test_segments_to_products_empty_list(self):
         from src.adapters.curation.segment_converter import segments_to_products
@@ -118,6 +201,44 @@ class TestSegmentToProduct:
         assert product.channels is not None
         assert len(product.channels) == 1
         assert str(product.channels[0].value) == "display"
+
+
+# ── CEL Parser Tests ───────────────────────────────────────────────────
+
+
+class TestCelParsers:
+    def test_extract_countries_in_list(self):
+        from src.adapters.curation.segment_converter import _extract_countries_from_cel
+
+        assert _extract_countries_from_cel("country IN ['US','GB']") == ["US", "GB"]
+
+    def test_extract_countries_equality(self):
+        from src.adapters.curation.segment_converter import _extract_countries_from_cel
+
+        assert _extract_countries_from_cel("country == 'SE'") == ["SE"]
+
+    def test_extract_countries_none(self):
+        from src.adapters.curation.segment_converter import _extract_countries_from_cel
+
+        assert _extract_countries_from_cel("hour >= 18") == []
+
+    def test_extract_devices_from_platform(self):
+        from src.adapters.curation.segment_converter import _extract_device_types_from_cel
+
+        result = _extract_device_types_from_cel("platform IN ['ios','macos']")
+        assert "mobile" in result
+        assert "desktop" in result
+
+    def test_extract_devices_from_device_type(self):
+        from src.adapters.curation.segment_converter import _extract_device_types_from_cel
+
+        result = _extract_device_types_from_cel("device_type == 'mobile'")
+        assert result == ["mobile"]
+
+    def test_extract_devices_none(self):
+        from src.adapters.curation.segment_converter import _extract_device_types_from_cel
+
+        assert _extract_device_types_from_cel("country == 'US' && hour >= 9") == []
 
 
 # ── Config Tests ───────────────────────────────────────────────────────

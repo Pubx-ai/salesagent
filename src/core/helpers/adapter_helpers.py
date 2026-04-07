@@ -190,11 +190,9 @@ def get_adapter(
     elif selected_adapter == "curation":
         from src.adapters.curation import CurationAdapter
 
-        # Load curation-specific config from adapter config if available
-        if config_row and hasattr(config_row, "connection_config") and config_row.connection_config:
-            curation_cfg = config_row.connection_config
-            if isinstance(curation_cfg, dict):
-                adapter_config.update(curation_cfg)
+        # Load curation-specific config from adapter config (config_json column)
+        if config_row and config_row.config_json and isinstance(config_row.config_json, dict):
+            adapter_config.update(config_row.config_json)
 
         return CurationAdapter(adapter_config, principal, dry_run, tenant_id=tenant_id)
     else:
