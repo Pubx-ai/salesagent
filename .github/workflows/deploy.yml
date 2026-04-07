@@ -1,0 +1,104 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches:
+      - develop
+    tags:
+      - 'v*'
+
+env:
+  SERVICE_NAME: prebid-sales-agent
+  AWS_REGION: us-east-1
+
+jobs:
+  build-and-deploy:
+    name: Build, Push & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == refs/heads/develop ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Unexpected ref ${{ github.ref }}"
+            exit 1
+          fi
+
+      - name: Determine deploy ref for infra repo
+        id: deploy-ref
+        run: |
+          if [[ "${{ steps.env.outputs.environment }}" == "prod" ]]; then
+            echo "infra_repo_ref=main" >> $GITHUB_OUTPUT
+          else
+            echo "infra_repo_ref=develop" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract Jira key
+        id: jira
+        run: |
+          SOURCE_REF="${{ github.ref }}"
+          JIRA_KEY=$(echo "$SOURCE_REF" | grep -oE '[A-Z]+-[0-9]+' | head -n 1)
+
+          if [[ -n "$JIRA_KEY" ]]; then
+            echo "key=$JIRA_KEY" >> $GITHUB_OUTPUT
+            echo "Detected Jira key: $JIRA_KEY"
+          else
+            echo "key=" >> $GITHUB_OUTPUT
+            echo "No Jira key detected in ref: $SOURCE_REF"
+          fi
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.SERVICE_NAME }}-${{ steps.env.outputs.environment }}
+          tags: |
+            type=sha,prefix=
+            type=sha,prefix=${{ steps.jira.outputs.key }}-,enable=${{ steps.jira.outputs.key != '' }}
+            type=semver,pattern={{version}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trigger deployment
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CURATION_INFRA_REPO_TOKEN }}
+          repository: Pubx-ai/curation-infra
+          event-type: deploy-service
+          client-payload: |
+            {
+              "service": "${{ env.SERVICE_NAME }}",
+              "version": "${{ steps.meta.outputs.version }}",
+              "environment": "${{ steps.env.outputs.environment }}",
+              "ref": "${{ steps.deploy-ref.outputs.infra_repo_ref }}"
+            }
