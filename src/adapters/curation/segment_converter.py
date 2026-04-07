@@ -31,8 +31,8 @@ from src.core.schemas.product import Product
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PUBLISHER_DOMAIN = "curation.local"
-DEFAULT_AGENT_URL = "https://curation.local"
+DEFAULT_PUBLISHER_DOMAIN = "pubx.ai"
+DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 
 # Maps platform values from CEL rules to AdCP device_type values
 _PLATFORM_TO_DEVICE: dict[str, str] = {
@@ -96,6 +96,47 @@ def _extract_device_types_from_cel(cel_rule: str) -> list[str]:
             devices.add(mapped)
 
     return sorted(devices)
+
+
+FORMAT_TYPE_TO_ID_PREFIX: dict[str, str] = {
+    "banner": "display",
+    "video": "video",
+    "native": "native",
+    "audio": "audio",
+}
+
+
+def _build_format_ids(metadata: dict[str, Any], agent_url: str) -> list[FormatId]:
+    """Build FormatId list from inventory_formats metadata.
+
+    Creates one FormatId per format type + size combination.
+    Falls back to a generic display_banner if no inventory_formats present.
+    """
+    inventory_formats = metadata.get("inventory_formats", {})
+    if not inventory_formats:
+        return [FormatId(id="display_banner", agent_url=agent_url)]
+
+    format_ids: list[FormatId] = []
+    for fmt_type, fmt_data in inventory_formats.items():
+        prefix = FORMAT_TYPE_TO_ID_PREFIX.get(fmt_type, fmt_type)
+        sizes = fmt_data.get("sizes", []) if isinstance(fmt_data, dict) else []
+
+        if not sizes:
+            format_ids.append(FormatId(id=f"{prefix}_{fmt_type}", agent_url=agent_url))
+            continue
+
+        for size in sizes:
+            parts = str(size).split("x")
+            if len(parts) == 2:
+                try:
+                    w, h = int(parts[0]), int(parts[1])
+                    format_ids.append(FormatId(id=f"{prefix}_{size}", agent_url=agent_url, width=w, height=h))
+                    continue
+                except ValueError:
+                    pass
+            format_ids.append(FormatId(id=f"{prefix}_{size}", agent_url=agent_url))
+
+    return format_ids or [FormatId(id="display_banner", agent_url=agent_url)]
 
 
 def _build_forecast(estimation: dict[str, Any]) -> DeliveryForecast | None:
@@ -170,14 +211,6 @@ def _build_ext(segment: dict[str, Any]) -> dict[str, Any]:
     if unique_sites and isinstance(unique_sites, (int, float)) and unique_sites > 0:
         ext["unique_sites"] = int(unique_sites)
 
-    owner = segment.get("owner")
-    if owner:
-        ext["owner"] = owner
-
-    rule_type = segment.get("rule_type")
-    if rule_type:
-        ext["rule_type"] = rule_type
-
     return ext or None  # type: ignore[return-value]
 
 
@@ -244,14 +277,26 @@ def segment_to_product(
     forecast = _build_forecast(estimation)
     ext = _build_ext(segment)
 
+    # Use domains from segment metadata, fall back to config default
+    segment_domains = metadata.get("domains", []) or []
+    pub_properties = []
+    for domain in segment_domains:
+        cleaned = domain.replace(" RON", "").strip()
+        if cleaned:
+            pub_properties.append(
+                PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": cleaned})
+            )
+    if not pub_properties:
+        pub_properties.append(
+            PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": publisher_domain})
+        )
+
     return Product(
         product_id=segment_id,
         name=name,
         description=description or f"Audience segment: {name}",
-        publisher_properties=[
-            PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": publisher_domain})
-        ],
-        format_ids=[FormatId(id="display_banner", agent_url=agent_url)],
+        publisher_properties=pub_properties,
+        format_ids=_build_format_ids(metadata, agent_url),
         delivery_type="non_guaranteed",
         pricing_options=[PricingOption(root=cpm)],
         delivery_measurement={"provider": "curation"},

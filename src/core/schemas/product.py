@@ -106,6 +106,12 @@ class Product(LibraryProduct):
         exclude=True,  # Exclude from serialization by default
     )
 
+    # AI ranking result (set by LLM ranking, not stored in DB)
+    relevance_score: float | None = Field(
+        default=None,
+        description="AI-computed relevance score (0.0-1.0) for the buyer's brief",
+    )
+
     @model_validator(mode="after")
     def validate_pricing_fields(self) -> "Product":
         """Validate pricing_options per AdCP spec.

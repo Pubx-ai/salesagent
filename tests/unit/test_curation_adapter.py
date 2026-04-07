@@ -147,7 +147,6 @@ class TestSegmentToProduct:
         assert ext["signals_used"] == ["country", "platform", "hour"]
         assert ext["domains"] == ["pubx.ai RON"]
         assert ext["unique_sites"] == 1315
-        assert ext["owner"] == "DS-Team"
 
     def test_non_viable_segment_returns_none(self):
         from src.adapters.curation.segment_converter import segment_to_product

@@ -766,8 +766,9 @@ async def _get_products_impl(
             from src.services.ai.factory import get_factory
 
             factory = get_factory()
-            if factory.is_ai_enabled():
-                model = factory.create_model()
+            tenant_ai_config = tenant.get("ai_config")
+            if factory.is_ai_enabled(tenant_ai_config):
+                model = factory.create_model(tenant_ai_config=tenant_ai_config)
                 agent = create_ranking_agent(model)
 
                 # Convert products to dicts for ranking
@@ -792,6 +793,12 @@ async def _get_products_impl(
                 # Filter out products with very low relevance (score < 0.1)
                 eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.1]
 
+                # Write ranking results back to product objects
+                for product in eligible_products:
+                    score, reason = ranking_map.get(product.product_id, (0.0, ""))
+                    product.brief_relevance = reason or None
+                    product.relevance_score = round(score, 2)
+
                 # Log the ranking results
                 for r in ranking_result.rankings:
                     logger.info(f"[AI_RANKING] {r.product_id}: score={r.relevance_score:.2f}, reason={r.reason}")
@@ -803,9 +810,9 @@ async def _get_products_impl(
             else:
                 if adapter_manages_own_persistence(tenant):
                     raise AdCPValidationError(
-                        "GEMINI_API_KEY is required for curation tenants. "
+                        "An AI API key is required for curation tenants. "
                         "AI ranking is needed to match segments to your brief. "
-                        "Set GEMINI_API_KEY in the environment and restart.",
+                        "Set the API key in Pubx Curation settings or set GEMINI_API_KEY in the environment.",
                         recovery="terminal",
                     )
                 logger.debug("[GET_PRODUCTS] AI ranking configured but AI not enabled (no API key)")
