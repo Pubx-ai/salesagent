@@ -148,7 +148,7 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
                 delivery_type="non_guaranteed",
                 cpm=float(bid_price) if bid_price else 0.0,
                 impressions=0,
-                format_ids=[LibraryFormatId(id="display_banner", agent_url="https://curation.local")],
+                format_ids=[LibraryFormatId(id="display_banner", agent_url="https://creative.adcontextprotocol.org")],
                 product_id=product_id,
                 buyer_ref=getattr(pkg, "buyer_ref", None),
             )

@@ -123,7 +123,7 @@ class CurationAdapter(ToolProvider):
         self._pricing_multiplier = conn.pricing_multiplier
         self._pricing_floor_cpm = conn.pricing_floor_cpm
         self._pricing_max_suggested_cpm = conn.pricing_max_suggested_cpm
-        self._publisher_domain = config.get("publisher_domain", "curation.local")
+        self._publisher_domain = config.get("publisher_domain", "")
 
     # ── Product catalog ────────────────────────────────────────────────
 

@@ -48,6 +48,35 @@ _PLATFORM_TO_DEVICE: dict[str, str] = {
 }
 
 
+def _normalize_domain(raw: str) -> str | None:
+    """Extract a bare domain from a raw domain string.
+
+    Handles: "https://www.example.com/", "example.com"
+    Skips run-of-network entries like "pubx.ai RON" (not a single domain).
+    Returns lowercase bare domain or None if invalid/skipped.
+    """
+    from urllib.parse import urlparse
+
+    if " RON" in raw:
+        return None
+
+    cleaned = raw.strip().rstrip("/")
+    if not cleaned:
+        return None
+
+    if cleaned.startswith(("http://", "https://")):
+        parsed = urlparse(cleaned)
+        hostname = parsed.hostname or ""
+    else:
+        hostname = cleaned.split("/")[0]
+
+    hostname = hostname.lower().strip(".")
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+
+    return hostname if hostname and "." in hostname else None
+
+
 def _round_currency(value: float) -> float:
     return math.floor(value * 100) / 100
 
@@ -279,13 +308,24 @@ def segment_to_product(
 
     # Use domains from segment metadata, fall back to config default
     segment_domains = metadata.get("domains", []) or []
+    is_ron = any(" RON" in d for d in segment_domains)
     pub_properties = []
-    for domain in segment_domains:
-        cleaned = domain.replace(" RON", "").strip()
-        if cleaned:
-            pub_properties.append(
-                PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": cleaned})
-            )
+
+    if is_ron:
+        pub_properties.append(
+            PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": publisher_domain})
+        )
+        if ext is None:
+            ext = {}
+        ext["run_of_network"] = True
+    else:
+        for domain in segment_domains:
+            cleaned = _normalize_domain(domain)
+            if cleaned:
+                pub_properties.append(
+                    PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": cleaned})
+                )
+
     if not pub_properties:
         pub_properties.append(
             PublisherPropertySelector.model_validate({"selection_type": "all", "publisher_domain": publisher_domain})
