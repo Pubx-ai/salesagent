@@ -27,6 +27,12 @@ Expected context variables:
         </div>
 
         <h4 style="margin-top: 1.5rem; margin-bottom: 1rem;">Service URLs</h4>
+        <p class="text-muted" style="font-size: 0.875rem; margin-bottom: 1rem;">
+            URLs are requested from the Sales Agent app process (e.g. inside Docker on your server).
+            Hostnames that only exist on your laptop or in another Compose network
+            (e.g. <code>*.seller.local</code>) will fail here. Use public staging URLs, VPC DNS,
+            or <code>host.docker.internal</code> only where your runtime can resolve them.
+        </p>
 
         <div class="form-group">
             <label for="curation_catalog_url">Catalog Service URL *</label>
@@ -254,7 +260,23 @@ function testCurationConnection() {
             const segCount = data.segment_count !== undefined ? ' (' + data.segment_count + ' segments)' : '';
             statusEl.innerHTML = '<span style="color: #10b981;">\u2713 Connected' + segCount + '</span>';
         } else {
-            statusEl.innerHTML = '<span style="color: #ef4444;">\u2717 ' + (data.error || 'Connection failed') + '</span>';
+            statusEl.textContent = '';
+            const wrap = document.createElement('span');
+            wrap.style.color = '#ef4444';
+            wrap.appendChild(document.createTextNode('\u2717 ' + (data.error || 'Connection failed')));
+            if (data.services && typeof data.services === 'object') {
+                const ul = document.createElement('ul');
+                ul.style.margin = '0.5rem 0 0 1rem';
+                ul.style.fontSize = '0.875rem';
+                ul.style.color = '#374151';
+                Object.keys(data.services).sort().forEach(function (name) {
+                    const li = document.createElement('li');
+                    li.textContent = name + ': ' + data.services[name];
+                    ul.appendChild(li);
+                });
+                wrap.appendChild(ul);
+            }
+            statusEl.appendChild(wrap);
         }
     })
     .catch(error => {

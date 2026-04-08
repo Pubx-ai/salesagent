@@ -1,0 +1,13 @@
+# Optional overlay: internal curation service hostnames that resolve on the EC2 host but
+# not inside Docker (private DNS / /etc.hosts). Merge when deploying next to the main file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.caddy.yml \
+#     -f docker-compose.curation-extra-hosts.yml up -d
+#
+# Edit the IPs below when your VPC endpoints change.
+
+services:
+  adcp-server:
+    extra_hosts:
+      - "sales-service.seller.local:10.21.13.166"
+      - "activation-service.seller.local:10.21.11.137"

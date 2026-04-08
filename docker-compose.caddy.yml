@@ -1,0 +1,40 @@
+# TLS termination with Caddy + Let's Encrypt (staging / production-style)
+#
+# Prerequisites:
+#   1. Ensure config/caddy/Caddyfile is a real FILE (not a directory). If compose
+#      ever failed because the file was missing, Docker may have created a directory
+#      at that path — remove it:  sudo rm -rf config/caddy/Caddyfile
+#      Then:  cp config/caddy/Caddyfile.example config/caddy/Caddyfile
+#      Edit Caddyfile: replace YOUR_HOSTNAME with your DNS name.
+#   2. In .env: CONDUCTOR_PORT=127.0.0.1:8080
+#      (nginx `proxy` stays on container port 8000; only published on host loopback
+#      so Caddy can bind public 80/443.)
+#   3. DNS A/AAAA for your hostname → this server's public IP.
+#   4. Security group: allow inbound TCP 80 and 443.
+#
+# Start:
+#   docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+#
+# App Dockerfile is unchanged; this uses the official Caddy image only.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # Mount the directory so a missing file is not auto-created as a directory
+      # at the mount target (which breaks file bind-mounts).
+      - ./config/caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      proxy:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -71,6 +71,27 @@ def get_sales_agent_url(protocol: str = "https") -> str | None:
     return None
 
 
+def get_sales_agent_public_base_url() -> str | None:
+    """Optional browser-facing origin (scheme + host, no path, no trailing slash).
+
+    Use when tenants are reached by path (e.g. ``/admin/tenant/<id>/...``) on one
+    hostname, but :class:`~src.core.database.models.Tenant` still has ``subdomain``
+    set (often ``default``). Without this override, OIDC redirect URIs are built as
+    ``https://{subdomain}.{SALES_AGENT_DOMAIN}``, which is wrong for path-based
+    routing behind a single DNS name.
+
+    Configure with the exact URL users type in the browser, including ``http`` or
+    ``https`` (e.g. ``http://salesagent.staging.example.com``).
+
+    Returns:
+        The configured ``SALES_AGENT_PUBLIC_BASE_URL``, or None if unset.
+    """
+    raw = os.getenv("SALES_AGENT_PUBLIC_BASE_URL", "").strip()
+    if not raw:
+        return None
+    return raw.rstrip("/")
+
+
 def get_admin_url(protocol: str = "https") -> str | None:
     """Get the full admin URL (e.g., https://admin.sales-agent.example.com).
 

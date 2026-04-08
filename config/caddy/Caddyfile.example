@@ -1,0 +1,9 @@
+# 1. Copy this file:
+#      cp config/caddy/Caddyfile.example config/caddy/Caddyfile
+# 2. Replace YOUR_HOSTNAME below with your real DNS name (e.g. salesagent.staging.pbxai.com).
+# 3. See docker-compose.caddy.yml for compose and .env notes.
+
+YOUR_HOSTNAME {
+	encode zstd gzip
+	reverse_proxy proxy:8000
+}

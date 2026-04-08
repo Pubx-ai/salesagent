@@ -364,6 +364,12 @@ def test_curation_connection(tenant_id, **kwargs):
                 results["activation"] = str(e)
 
         all_ok = all(v == "ok" for v in results.values())
+        if not all_ok:
+            logger.info(
+                "Curation test-connection incomplete for tenant_id=%s: %s",
+                tenant_id,
+                results,
+            )
         return jsonify(
             {
                 "success": all_ok,

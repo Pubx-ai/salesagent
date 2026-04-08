@@ -1,4 +1,5 @@
 # Local configuration
+config/caddy/Caddyfile
 config.json
 __pycache__
 adcp.db
