@@ -123,6 +123,17 @@ def _detect_tenant(headers: dict) -> tuple[str | None, dict | None]:
             if tenant_context:
                 tenant_id = tenant_context["tenant_id"]
 
+    # 5. Single-tenant mode: Host may be deployment apex (e.g. salesagent.example.com)
+    #    while Tenant.subdomain stays "default" — subdomain extraction would miss.
+    if not tenant_id:
+        from src.core.config_loader import get_single_tenant, is_single_tenant_mode
+
+        if is_single_tenant_mode():
+            st = get_single_tenant()
+            if st:
+                tenant_context = st
+                tenant_id = st["tenant_id"]
+
     return tenant_id, tenant_context
 
 

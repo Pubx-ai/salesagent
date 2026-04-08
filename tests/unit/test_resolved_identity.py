@@ -154,6 +154,27 @@ class TestResolveIdentity:
 
         assert identity.tenant_id == "default"
 
+    @patch("src.core.auth_utils.get_principal_from_token")
+    @patch("src.core.config_loader.get_single_tenant")
+    @patch("src.core.config_loader.is_single_tenant_mode", return_value=True)
+    @patch("src.core.resolved_identity.get_tenant_by_subdomain", return_value=None)
+    @patch("src.core.resolved_identity.get_tenant_by_virtual_host", return_value=None)
+    def test_resolve_apex_host_single_tenant_when_first_label_not_subdomain(
+        self, mock_get_vhost, mock_get_subdomain, _mock_is_single_mode, mock_get_single, mock_get_principal
+    ):
+        """Apex Host (e.g. salesagent.example.com) may not match Tenant.subdomain ('default')."""
+        mock_get_single.return_value = {"tenant_id": "default", "name": "Pub"}
+        mock_get_principal.return_value = ("principal_1", None)
+
+        identity = resolve_identity(
+            headers={"host": "salesagent.staging.example.com", "x-adcp-auth": "tok"},
+            auth_token="tok",
+            protocol="mcp",
+        )
+
+        assert identity.tenant_id == "default"
+        mock_get_principal.assert_called_once_with("tok", "default")
+
 
 class TestAuthConsolidation:
     """Test that auth.py delegates to auth_utils.py (with retry)."""
