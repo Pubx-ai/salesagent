@@ -40,6 +40,10 @@ class CurationConnectionConfig(BaseConnectionConfig):
         default_factory=lambda: float(os.getenv("CURATION_PRICING_MAX_SUGGESTED_CPM", "10")),
         description="Cap on the suggested CPM after multiplier",
     )
+    mock_activation: bool = Field(
+        default_factory=lambda: os.getenv("CURATION_MOCK_ACTIVATION", "false").lower() == "true",
+        description="When true, skip real activation service and return mock deal IDs",
+    )
     http_timeout_seconds: float = Field(
         default=30.0,
         description="HTTP request timeout for curation service calls",

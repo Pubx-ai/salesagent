@@ -136,6 +136,17 @@ Expected context variables:
         <h4 style="margin-top: 2rem; margin-bottom: 1rem;">Advanced</h4>
 
         <div class="form-group">
+            <label for="curation_mock_activation">
+                <input type="checkbox" id="curation_mock_activation" name="curation_mock_activation"
+                       {% if adapter_config and adapter_config.get('mock_activation') %}checked{% endif %}>
+                Mock Activation
+            </label>
+            <small class="form-text text-muted">
+                Skip the real Activation service and generate mock deal IDs. Useful for local development when the Activation service is unavailable.
+            </small>
+        </div>
+
+        <div class="form-group">
             <label for="curation_http_timeout">HTTP Timeout (seconds)</label>
             <input type="number" id="curation_http_timeout" name="curation_http_timeout"
                    value="{{ adapter_config.get('http_timeout_seconds', 30) if adapter_config else 30 }}"
@@ -168,6 +179,7 @@ function saveCurationConfig() {
         pricing_multiplier: parseFloat(document.getElementById('curation_pricing_multiplier').value) || 5,
         pricing_floor_cpm: parseFloat(document.getElementById('curation_pricing_floor').value) || 0.1,
         pricing_max_suggested_cpm: parseFloat(document.getElementById('curation_pricing_max').value) || 10,
+        mock_activation: document.getElementById('curation_mock_activation').checked,
         http_timeout_seconds: parseFloat(document.getElementById('curation_http_timeout').value) || 30
     };
 

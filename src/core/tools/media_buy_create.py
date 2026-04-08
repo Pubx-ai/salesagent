@@ -1390,24 +1390,10 @@ async def _create_media_buy_impl(
     if not tenant:
         raise AdCPAuthenticationError("No tenant context available")
 
-    # Validate setup completion (only in production, skip for testing)
-    if not testing_ctx.dry_run and not testing_ctx.test_session_id:
-        try:
-            validate_setup_complete(tenant["tenant_id"])
-        except SetupIncompleteError as e:
-            # Return helpful error with missing tasks
-            task_list = "\n".join(f"  - {task['name']}: {task['description']}" for task in e.missing_tasks)
-            error_msg = (
-                f"Setup incomplete. Please complete the following required tasks:\n\n{task_list}\n\n"
-                f"Visit the setup checklist at /tenant/{tenant['tenant_id']}/setup-checklist for details."
-            )
-            raise AdCPValidationError(error_msg, recovery="terminal")
-
     # Validate principal exists BEFORE creating context (foreign key constraint)
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
     if not principal:
         error_msg = f"Principal {principal_id} not found"
-        # Cannot create context or workflow step without valid principal
         return CreateMediaBuyResult(
             response=CreateMediaBuyError(
                 errors=[Error(code="authentication_error", message=error_msg, details=None)],
@@ -1417,10 +1403,8 @@ async def _create_media_buy_impl(
         )
 
     # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
-    # These adapters bypass Postgres entirely -- no buyer_ref dedup, no workflow steps,
-    # no ORM MediaBuy/MediaPackage creation. The adapter handles the full lifecycle.
-    # Check via the class attribute on the registry to avoid instantiating the adapter
-    # (which would trigger get_adapter side effects in unit tests).
+    # These adapters bypass Postgres entirely -- no setup validation, no buyer_ref dedup,
+    # no workflow steps, no ORM creation. The adapter handles the full lifecycle.
     manages_own_persistence = _adapter_manages_own_persistence(tenant)
 
     if manages_own_persistence:
@@ -1442,6 +1426,18 @@ async def _create_media_buy_impl(
         except Exception as e:
             logger.exception("External adapter create_media_buy failed")
             raise AdCPAdapterError(f"Adapter error: {e}") from e
+
+    # Validate setup completion (only for Postgres-backed adapters, skip for testing)
+    if not testing_ctx.dry_run and not testing_ctx.test_session_id:
+        try:
+            validate_setup_complete(tenant["tenant_id"])
+        except SetupIncompleteError as e:
+            task_list = "\n".join(f"  - {task['name']}: {task['description']}" for task in e.missing_tasks)
+            error_msg = (
+                f"Setup incomplete. Please complete the following required tasks:\n\n{task_list}\n\n"
+                f"Visit the setup checklist at /tenant/{tenant['tenant_id']}/setup-checklist for details."
+            )
+            raise AdCPValidationError(error_msg, recovery="terminal")
 
     # Validate buyer_ref uniqueness within tenant+principal scope (BR-RULE-009)
     if req.buyer_ref:

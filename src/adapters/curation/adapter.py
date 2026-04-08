@@ -25,7 +25,7 @@ from src.adapters.curation.activation_client import ActivationClient
 from src.adapters.curation.catalog_client import CatalogClient
 from src.adapters.curation.config import CurationConnectionConfig
 from src.adapters.curation.sales_client import SalesClient
-from src.adapters.curation.segment_converter import segments_to_products
+from src.adapters.curation.segment_converter import DEFAULT_PUBLISHER_DOMAIN, segments_to_products
 from src.core.exceptions import AdCPAdapterError
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
@@ -123,7 +123,8 @@ class CurationAdapter(ToolProvider):
         self._pricing_multiplier = conn.pricing_multiplier
         self._pricing_floor_cpm = conn.pricing_floor_cpm
         self._pricing_max_suggested_cpm = conn.pricing_max_suggested_cpm
-        self._publisher_domain = config.get("publisher_domain", "")
+        self._publisher_domain = config.get("publisher_domain") or DEFAULT_PUBLISHER_DOMAIN
+        self._mock_activation = conn.mock_activation
 
     # ── Product catalog ────────────────────────────────────────────────
 
@@ -181,45 +182,7 @@ class CurationAdapter(ToolProvider):
             raise AdCPAdapterError("Sales service did not return a sale_id")
         logger.info("Created sale %s in Sales service", sale_id)
 
-        ssp_deal_id: str | None = None
-        try:
-            activation_price = pricing_info.get("fixed_price") or pricing_info.get("floor_price") or 0
-            act_result = self._activation.create_activation(
-                {
-                    "sale_id": sale_id,
-                    "ssp_name": "magnite",
-                    "start_date": start_time.isoformat(),
-                    "end_date": end_time.isoformat(),
-                    "price": {"amount": activation_price, "currency": pricing_info.get("currency", "USD")},
-                }
-            )
-
-            activations = act_result.get("activations", [])
-            if activations:
-                ssp_deal_id = activations[0].get("deal_id")
-                logger.info("Activation created: deal_id=%s", ssp_deal_id)
-        except Exception:
-            logger.exception("Activation failed for sale %s, deal will be pending_activation", sale_id)
-
-        if ssp_deal_id:
-            try:
-                self._sales.update_sale(
-                    sale_id,
-                    {
-                        "status": "active",
-                        "activations": [
-                            {
-                                "activation_id": f"act-{sale_id}",
-                                "ssp_name": "magnite",
-                                "dsp_name": ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name")),
-                                "deal_id": ssp_deal_id,
-                                "status": "active",
-                            }
-                        ],
-                    },
-                )
-            except Exception:
-                logger.warning("Failed to update sale %s status after activation", sale_id, exc_info=True)
+        ssp_deal_id = self._activate_deal(sale_id, pricing_info, dsps, start_time, end_time)
 
         pkg_responses = [
             ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=ssp_deal_id is None)
@@ -233,6 +196,69 @@ class CurationAdapter(ToolProvider):
             creative_deadline=creative_deadline,
             packages=pkg_responses,
         )
+
+    def _activate_deal(
+        self,
+        sale_id: str,
+        pricing_info: dict[str, Any],
+        dsps: list[dict[str, Any]],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> str | None:
+        """Activate a deal via the Activation service, or mock it.
+
+        Returns the SSP deal_id on success, None on failure.
+        Updates the sale status in the Sales service if activation succeeds.
+        """
+        ssp_deal_id: str | None = None
+
+        if self._mock_activation:
+            import uuid
+
+            ssp_deal_id = f"mock-deal-{uuid.uuid4().hex[:8]}"
+            logger.info("Mock activation for sale %s: deal_id=%s", sale_id, ssp_deal_id)
+        else:
+            try:
+                activation_price = pricing_info.get("fixed_price") or pricing_info.get("floor_price") or 0
+                act_result = self._activation.create_activation(
+                    {
+                        "sale_id": sale_id,
+                        "ssp_name": "magnite",
+                        "start_date": start_time.isoformat(),
+                        "end_date": end_time.isoformat(),
+                        "price": {"amount": activation_price, "currency": pricing_info.get("currency", "USD")},
+                    }
+                )
+
+                activations = act_result.get("activations", [])
+                if activations:
+                    ssp_deal_id = activations[0].get("deal_id")
+                    logger.info("Activation created: deal_id=%s", ssp_deal_id)
+            except Exception:
+                logger.exception("Activation failed for sale %s, deal will be pending_activation", sale_id)
+
+        if ssp_deal_id:
+            dsp_label = ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name"))
+            try:
+                self._sales.update_sale(
+                    sale_id,
+                    {
+                        "status": "active",
+                        "activations": [
+                            {
+                                "activation_id": f"act-{sale_id}",
+                                "ssp_name": "magnite",
+                                "dsp_name": dsp_label,
+                                "deal_id": ssp_deal_id,
+                                "status": "active",
+                            }
+                        ],
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to update sale %s status after activation", sale_id, exc_info=True)
+
+        return ssp_deal_id
 
     # ── Check status ───────────────────────────────────────────────────
 
