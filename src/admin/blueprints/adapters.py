@@ -351,15 +351,13 @@ def test_curation_connection(tenant_id, **kwargs):
             except Exception as e:
                 results["sales"] = str(e)
 
-        # Test activation
+        # Test activation (health probe — same pattern as typical service liveness)
         if activation_url:
             try:
                 with httpx.Client(timeout=10) as client:
-                    resp = client.get(f"{activation_url.rstrip('/')}/activations", params={"limit": 1})
-                    if resp.status_code < 500:
-                        results["activation"] = "ok"
-                    else:
-                        results["activation"] = f"HTTP {resp.status_code}"
+                    resp = client.get(f"{activation_url.rstrip('/')}/health")
+                    resp.raise_for_status()
+                    results["activation"] = "ok"
             except Exception as e:
                 results["activation"] = str(e)
 
