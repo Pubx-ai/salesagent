@@ -727,3 +727,46 @@ class TestSalesClientListSales:
             result = client.list_sales()
 
         assert result == expected
+
+
+# ── ADCP_STATUS_TO_SALE_STATUSES Tests ────────────────────────────────────
+
+
+class TestAdcpToSaleStatusReverseMap:
+    """Reverse mapping of AdCP MediaBuyStatus values to curation sale statuses."""
+
+    def test_pending_activation_maps_to_both_pending_states(self):
+        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+
+        assert ADCP_STATUS_TO_SALE_STATUSES["pending_activation"] == [
+            "pending_approval",
+            "pending_activation",
+        ]
+
+    def test_active_maps_to_single_active(self):
+        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+
+        assert ADCP_STATUS_TO_SALE_STATUSES["active"] == ["active"]
+
+    def test_completed_maps_to_completed_and_canceled(self):
+        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+
+        assert ADCP_STATUS_TO_SALE_STATUSES["completed"] == ["completed", "canceled"]
+
+    def test_failed_maps_to_failed_and_rejected(self):
+        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+
+        assert ADCP_STATUS_TO_SALE_STATUSES["failed"] == ["failed", "rejected"]
+
+    def test_reverse_map_covers_all_forward_mapping_values(self):
+        from src.adapters.curation.adapter import (
+            ADCP_STATUS_TO_SALE_STATUSES,
+            SALE_STATUS_TO_ADCP,
+        )
+
+        forward_adcp_values = set(SALE_STATUS_TO_ADCP.values())
+        reverse_keys = set(ADCP_STATUS_TO_SALE_STATUSES.keys())
+        assert forward_adcp_values == reverse_keys, (
+            "Every AdCP status in SALE_STATUS_TO_ADCP.values() must be a key "
+            "in ADCP_STATUS_TO_SALE_STATUSES, and vice versa."
+        )

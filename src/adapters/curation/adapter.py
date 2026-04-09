@@ -56,6 +56,18 @@ SALE_STATUS_TO_ADCP = {
     "canceled": "completed",
 }
 
+# Inverse of SALE_STATUS_TO_ADCP. One AdCP status may map to multiple curation
+# statuses because the forward mapping is lossy (both `completed` and `canceled`
+# map to AdCP `completed`; both `failed` and `rejected` map to AdCP `failed`;
+# both `pending_approval` and `pending_activation` map to AdCP `pending_activation`).
+ADCP_STATUS_TO_SALE_STATUSES: dict[str, list[str]] = {
+    "pending_activation": ["pending_approval", "pending_activation"],
+    "active": ["active"],
+    "paused": ["paused"],
+    "completed": ["completed", "canceled"],
+    "failed": ["failed", "rejected"],
+}
+
 ACTION_TO_ADCP_STATUS = {
     "pause": "paused",
     "resume": "active",
