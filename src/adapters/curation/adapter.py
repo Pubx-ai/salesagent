@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from adcp.types.aliases import Package as ResponsePackage
+from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
 
 from src.adapters.base import (
     AdapterCapabilities,
@@ -392,13 +393,8 @@ class CurationAdapter(ToolProvider):
         - budget: always None at the package level (no per-package budget
           concept in curation sales)
         - status: SALE_STATUS_TO_ADCP mapping, fallback pending_activation
-
-        Uses ``model_construct`` (validation bypass) so that datetime values
-        can be stored on the string-typed ``start_time``/``end_time`` package
-        fields and so that ``status`` remains a raw string rather than being
-        coerced to the ``MediaBuyStatus`` enum. This mirrors how the
-        ``media_buy_list`` _impl consumes timestamps and status values
-        downstream.
+        - start_time/end_time: passed as raw ISO strings (schema uses `str | None`)
+        - created_at/updated_at: parsed to datetime (schema uses `datetime | None`)
         """
         sale_id = sale["sale_id"]
         sale_pricing = sale.get("pricing") or {}
@@ -415,14 +411,14 @@ class CurationAdapter(ToolProvider):
             bid_price = seg_pricing.get("fixed_price") or seg_pricing.get("floor_price")
 
             packages.append(
-                GetMediaBuysPackage.model_construct(
+                GetMediaBuysPackage(
                     package_id=segment_id,
                     buyer_ref=sale.get("buyer_ref"),
                     budget=None,
                     bid_price=float(bid_price) if bid_price is not None else None,
                     product_id=segment_id,
-                    start_time=_parse_iso(sale.get("start_time")),
-                    end_time=_parse_iso(sale.get("end_time")),
+                    start_time=sale.get("start_time"),
+                    end_time=sale.get("end_time"),
                     paused=None,
                     creative_approvals=None,
                     snapshot=None,
@@ -430,11 +426,13 @@ class CurationAdapter(ToolProvider):
                 )
             )
 
-        return GetMediaBuysMediaBuy.model_construct(
+        adcp_status_str = SALE_STATUS_TO_ADCP.get(sale.get("status", ""), "pending_activation")
+
+        return GetMediaBuysMediaBuy(
             media_buy_id=sale_id,
             buyer_ref=sale.get("buyer_ref"),
             buyer_campaign_ref=sale.get("buyer_campaign_ref"),
-            status=SALE_STATUS_TO_ADCP.get(sale.get("status", ""), "pending_activation"),
+            status=MediaBuyStatus(adcp_status_str),
             currency=currency,
             total_budget=float(sale.get("budget") or 0.0),
             packages=packages,

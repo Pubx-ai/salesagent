@@ -887,7 +887,7 @@ class TestSaleToMediaBuy:
         assert mb.media_buy_id == "sale-abc-123"
         assert mb.buyer_ref == "buyer-1"
         assert mb.buyer_campaign_ref == "camp-9"
-        assert mb.status == "active"
+        assert mb.status.value == "active"
         assert mb.currency == "USD"
         assert mb.total_budget == 1000.0
         assert len(mb.packages) == 2
@@ -936,12 +936,8 @@ class TestSaleToMediaBuy:
         adapter = _make_adapter()
         mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
         for pkg in mb.packages:
-            assert pkg.start_time is not None
-            assert pkg.start_time.year == 2026
-            assert pkg.start_time.month == 4
-            assert pkg.end_time is not None
-            assert pkg.end_time.month == 4
-            assert pkg.end_time.day == 30
+            assert pkg.start_time == "2026-04-01T00:00:00Z"
+            assert pkg.end_time == "2026-04-30T23:59:59Z"
 
     def test_zero_segments_yields_empty_packages(self):
         adapter = _make_adapter()
@@ -965,13 +961,13 @@ class TestSaleToMediaBuy:
         sale = {**SAMPLE_SALE_DICT, "status": "canceled"}
         mb = adapter._sale_to_media_buy(sale)
         # SALE_STATUS_TO_ADCP["canceled"] == "completed"
-        assert mb.status == "completed"
+        assert mb.status.value == "completed"
 
     def test_unknown_status_defaults_to_pending_activation(self):
         adapter = _make_adapter()
         sale = {**SAMPLE_SALE_DICT, "status": "weirdstate"}
         mb = adapter._sale_to_media_buy(sale)
-        assert mb.status == "pending_activation"
+        assert mb.status.value == "pending_activation"
 
     def test_missing_pricing_yields_none_bid_price(self):
         adapter = _make_adapter()
@@ -999,3 +995,16 @@ class TestSaleToMediaBuy:
         mb = adapter._sale_to_media_buy(sale)
         assert mb.packages[0].bid_price == 9.99
         assert mb.packages[1].bid_price == 2.50  # sale-level floor
+
+    def test_media_buy_created_at_updated_at_as_datetime(self):
+        """created_at / updated_at are parsed into datetime objects."""
+        from datetime import datetime
+
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        assert isinstance(mb.created_at, datetime)
+        assert mb.created_at.year == 2026
+        assert mb.created_at.month == 3
+        assert mb.created_at.day == 29
+        assert isinstance(mb.updated_at, datetime)
+        assert mb.updated_at.day == 30
