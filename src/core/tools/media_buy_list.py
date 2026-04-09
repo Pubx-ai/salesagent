@@ -106,7 +106,11 @@ def _get_media_buys_impl(
             errors=[{"code": "principal_id_missing", "message": "Principal ID not found in context"}],
         )
 
-    principal = get_principal_object(principal_id)
+    # Pass tenant_id explicitly so get_principal_object doesn't fall through
+    # to get_current_tenant() — that path requires tenant context to already
+    # be set at the transport boundary, which we cannot rely on in the _impl
+    # layer. Matches the pattern in src/core/tools/products.py.
+    principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
     if not principal:
         return GetMediaBuysResponse(
             media_buys=[],
