@@ -11,6 +11,7 @@ and SSP deal activations via external HTTP services.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,6 +35,8 @@ from src.core.schemas import (
     CreateMediaBuyResponse,
     CreateMediaBuySuccess,
     DeliveryTotals,
+    GetMediaBuysMediaBuy,
+    GetMediaBuysPackage,
     MediaPackage,
     PackagePerformance,
     Principal,
@@ -73,6 +76,33 @@ ACTION_TO_ADCP_STATUS = {
     "resume": "active",
     "cancel": "completed",
 }
+
+
+@dataclass
+class ListMediaBuysResult:
+    """Result of CurationAdapter.list_media_buys().
+
+    Attributes:
+        media_buys: Mapped AdCP media buys (one per sale in the result set).
+        truncated: True if the fetch-all loop hit the safety cap before
+            exhausting pages. The caller appends a soft errors[] entry so
+            clients see the signal.
+        total_fetched: Number of sales actually converted into media buys.
+    """
+
+    media_buys: list["GetMediaBuysMediaBuy"]
+    truncated: bool
+    total_fetched: int
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    """Parse an ISO8601 string into a datetime, or return None.
+
+    Handles both ``2026-04-09T12:34:56Z`` and ``2026-04-09T12:34:56+00:00``.
+    """
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class CurationAdapter(ToolProvider):

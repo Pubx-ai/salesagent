@@ -770,3 +770,61 @@ class TestAdcpToSaleStatusReverseMap:
             "Every AdCP status in SALE_STATUS_TO_ADCP.values() must be a key "
             "in ADCP_STATUS_TO_SALE_STATUSES, and vice versa."
         )
+
+
+# ── Helpers Tests ─────────────────────────────────────────────────────────
+
+
+class TestListMediaBuysResult:
+    def test_default_construction(self):
+        from src.adapters.curation.adapter import ListMediaBuysResult
+
+        result = ListMediaBuysResult(
+            media_buys=[],
+            truncated=False,
+            total_fetched=0,
+        )
+        assert result.media_buys == []
+        assert result.truncated is False
+        assert result.total_fetched == 0
+
+    def test_with_items(self):
+        from src.adapters.curation.adapter import ListMediaBuysResult
+
+        result = ListMediaBuysResult(
+            media_buys=["placeholder"],
+            truncated=True,
+            total_fetched=500,
+        )
+        assert len(result.media_buys) == 1
+        assert result.truncated is True
+        assert result.total_fetched == 500
+
+
+class TestParseIso:
+    def test_parses_z_suffix(self):
+        from src.adapters.curation.adapter import _parse_iso
+
+        result = _parse_iso("2026-04-09T12:34:56Z")
+        assert result is not None
+        assert result.year == 2026
+        assert result.month == 4
+        assert result.day == 9
+        assert result.hour == 12
+
+    def test_parses_plus_offset(self):
+        from src.adapters.curation.adapter import _parse_iso
+
+        result = _parse_iso("2026-04-09T12:34:56+00:00")
+        assert result is not None
+        assert result.year == 2026
+
+    def test_returns_none_for_none(self):
+        from src.adapters.curation.adapter import _parse_iso
+
+        assert _parse_iso(None) is None
+
+    def test_returns_none_for_empty_string(self):
+        from src.adapters.curation.adapter import _parse_iso
+
+        assert _parse_iso("") is None
