@@ -44,6 +44,12 @@ class CurationConnectionConfig(BaseConnectionConfig):
         default_factory=lambda: os.getenv("CURATION_MOCK_ACTIVATION", "false").lower() == "true",
         description="When true, skip real activation service and return mock deal IDs",
     )
+    max_media_buys_per_list: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description="Safety cap on the number of sales fetched in a single get_media_buys call",
+    )
     http_timeout_seconds: float = Field(
         default=30.0,
         description="HTTP request timeout for curation service calls",
