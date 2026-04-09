@@ -125,6 +125,7 @@ class CurationAdapter(ToolProvider):
         self._pricing_max_suggested_cpm = conn.pricing_max_suggested_cpm
         self._publisher_domain = config.get("publisher_domain") or DEFAULT_PUBLISHER_DOMAIN
         self._mock_activation = conn.mock_activation
+        self._max_media_buys_per_list = conn.max_media_buys_per_list
 
     # ── Product catalog ────────────────────────────────────────────────
 
