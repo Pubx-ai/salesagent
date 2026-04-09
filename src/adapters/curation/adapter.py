@@ -379,6 +379,69 @@ class CurationAdapter(ToolProvider):
     ) -> bool:
         return True
 
+    # ── Sale → AdCP media buy converter ────────────────────────────────
+
+    def _sale_to_media_buy(self, sale: dict) -> GetMediaBuysMediaBuy:
+        """Convert a curation SaleResponse dict to an AdCP GetMediaBuysMediaBuy.
+
+        Mapping rules (see spec §5.5):
+        - One sale segment → one GetMediaBuysPackage
+        - package_id = product_id = segment.segment_id
+        - bid_price: segment.pricing.fixed_price → segment.pricing.floor_price
+          → sale.pricing.fixed_price → sale.pricing.floor_price → None
+        - budget: always None at the package level (no per-package budget
+          concept in curation sales)
+        - status: SALE_STATUS_TO_ADCP mapping, fallback pending_activation
+
+        Uses ``model_construct`` (validation bypass) so that datetime values
+        can be stored on the string-typed ``start_time``/``end_time`` package
+        fields and so that ``status`` remains a raw string rather than being
+        coerced to the ``MediaBuyStatus`` enum. This mirrors how the
+        ``media_buy_list`` _impl consumes timestamps and status values
+        downstream.
+        """
+        sale_id = sale["sale_id"]
+        sale_pricing = sale.get("pricing") or {}
+        currency = sale_pricing.get("currency", "USD")
+
+        packages: list[GetMediaBuysPackage] = []
+        for seg in sale.get("segments") or []:
+            segment_id = seg.get("segment_id")
+            if not segment_id:
+                continue
+
+            # Per-segment pricing override (forward-compat), else sale-level
+            seg_pricing = seg.get("pricing") or sale_pricing
+            bid_price = seg_pricing.get("fixed_price") or seg_pricing.get("floor_price")
+
+            packages.append(
+                GetMediaBuysPackage.model_construct(
+                    package_id=segment_id,
+                    buyer_ref=sale.get("buyer_ref"),
+                    budget=None,
+                    bid_price=float(bid_price) if bid_price is not None else None,
+                    product_id=segment_id,
+                    start_time=_parse_iso(sale.get("start_time")),
+                    end_time=_parse_iso(sale.get("end_time")),
+                    paused=None,
+                    creative_approvals=None,
+                    snapshot=None,
+                    snapshot_unavailable_reason=None,
+                )
+            )
+
+        return GetMediaBuysMediaBuy.model_construct(
+            media_buy_id=sale_id,
+            buyer_ref=sale.get("buyer_ref"),
+            buyer_campaign_ref=sale.get("buyer_campaign_ref"),
+            status=SALE_STATUS_TO_ADCP.get(sale.get("status", ""), "pending_activation"),
+            currency=currency,
+            total_budget=float(sale.get("budget") or 0.0),
+            packages=packages,
+            created_at=_parse_iso(sale.get("created_at")),
+            updated_at=_parse_iso(sale.get("updated_at")),
+        )
+
 
 def _extract_pricing(package_pricing_info: dict[str, dict] | None) -> dict[str, Any]:
     """Extract pricing from the first package's pricing info."""

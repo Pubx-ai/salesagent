@@ -828,3 +828,174 @@ class TestParseIso:
         from src.adapters.curation.adapter import _parse_iso
 
         assert _parse_iso("") is None
+
+
+# ── _sale_to_media_buy Converter Tests ────────────────────────────────────
+
+
+SAMPLE_SALE_DICT = {
+    "sale_id": "sale-abc-123",
+    "buyer_ref": "buyer-1",
+    "buyer_campaign_ref": "camp-9",
+    "segments": [
+        {"segment_id": "seg-red"},
+        {"segment_id": "seg-blue"},
+    ],
+    "activations": [],
+    "pricing": {
+        "pricing_model": "cpm",
+        "currency": "USD",
+        "floor_price": 2.50,
+        "fixed_price": None,
+    },
+    "deal_type": "curated",
+    "platform_id": "magnite",
+    "dsps": [],
+    "ad_format_types": None,
+    "start_time": "2026-04-01T00:00:00Z",
+    "end_time": "2026-04-30T23:59:59Z",
+    "brand": None,
+    "budget": 1000.0,
+    "status": "active",
+    "created_at": "2026-03-29T10:00:00Z",
+    "updated_at": "2026-03-30T15:00:00Z",
+}
+
+
+def _make_adapter():
+    """Helper: build a CurationAdapter instance for unit tests."""
+    from src.adapters.curation.adapter import CurationAdapter
+    from src.core.schemas import Principal
+
+    p = Principal(principal_id="p1", name="p", platform_mappings={})
+    return CurationAdapter(
+        config={
+            "sales_service_url": "http://sales.test",
+            "catalog_service_url": "http://catalog.test",
+            "activation_service_url": "http://activation.test",
+        },
+        principal=p,
+        tenant_id="t1",
+    )
+
+
+class TestSaleToMediaBuy:
+    def test_single_sale_with_two_segments_produces_two_packages(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+
+        assert mb.media_buy_id == "sale-abc-123"
+        assert mb.buyer_ref == "buyer-1"
+        assert mb.buyer_campaign_ref == "camp-9"
+        assert mb.status == "active"
+        assert mb.currency == "USD"
+        assert mb.total_budget == 1000.0
+        assert len(mb.packages) == 2
+
+    def test_package_ids_use_segment_id(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        pkg_ids = [pkg.package_id for pkg in mb.packages]
+        assert pkg_ids == ["seg-red", "seg-blue"]
+
+    def test_package_product_id_matches_package_id(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        for pkg in mb.packages:
+            assert pkg.package_id == pkg.product_id
+
+    def test_package_bid_price_from_sale_floor_price(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        for pkg in mb.packages:
+            assert pkg.bid_price == 2.50
+
+    def test_package_prefers_fixed_price_over_floor_price(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "pricing": {
+            "pricing_model": "cpm", "currency": "USD",
+            "floor_price": 2.50, "fixed_price": 5.00,
+        }}
+        mb = adapter._sale_to_media_buy(sale)
+        for pkg in mb.packages:
+            assert pkg.bid_price == 5.00
+
+    def test_package_budget_is_none(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        for pkg in mb.packages:
+            assert pkg.budget is None
+
+    def test_package_buyer_ref_from_sale(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        for pkg in mb.packages:
+            assert pkg.buyer_ref == "buyer-1"
+
+    def test_package_times_from_sale(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        for pkg in mb.packages:
+            assert pkg.start_time is not None
+            assert pkg.start_time.year == 2026
+            assert pkg.start_time.month == 4
+            assert pkg.end_time is not None
+            assert pkg.end_time.month == 4
+            assert pkg.end_time.day == 30
+
+    def test_zero_segments_yields_empty_packages(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "segments": []}
+        mb = adapter._sale_to_media_buy(sale)
+        assert mb.packages == []
+        assert mb.media_buy_id == "sale-abc-123"
+
+    def test_segment_without_id_is_skipped(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "segments": [
+            {"segment_id": "seg-red"},
+            {},  # missing segment_id
+            {"segment_id": "seg-blue"},
+        ]}
+        mb = adapter._sale_to_media_buy(sale)
+        assert [pkg.package_id for pkg in mb.packages] == ["seg-red", "seg-blue"]
+
+    def test_status_maps_through_sale_status_dict(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "status": "canceled"}
+        mb = adapter._sale_to_media_buy(sale)
+        # SALE_STATUS_TO_ADCP["canceled"] == "completed"
+        assert mb.status == "completed"
+
+    def test_unknown_status_defaults_to_pending_activation(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "status": "weirdstate"}
+        mb = adapter._sale_to_media_buy(sale)
+        assert mb.status == "pending_activation"
+
+    def test_missing_pricing_yields_none_bid_price(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "pricing": None}
+        mb = adapter._sale_to_media_buy(sale)
+        for pkg in mb.packages:
+            assert pkg.bid_price is None
+        assert mb.currency == "USD"  # default
+
+    def test_missing_budget_yields_zero(self):
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "budget": None}
+        mb = adapter._sale_to_media_buy(sale)
+        assert mb.total_budget == 0.0
+
+    def test_per_segment_pricing_override_forward_compat(self):
+        """Forward-compatibility: if segment has pricing, it wins."""
+        adapter = _make_adapter()
+        sale = {**SAMPLE_SALE_DICT, "segments": [
+            {"segment_id": "seg-red", "pricing": {
+                "fixed_price": 9.99, "currency": "USD",
+            }},
+            {"segment_id": "seg-blue"},  # uses sale-level
+        ]}
+        mb = adapter._sale_to_media_buy(sale)
+        assert mb.packages[0].bid_price == 9.99
+        assert mb.packages[1].bid_price == 2.50  # sale-level floor
