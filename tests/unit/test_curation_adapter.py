@@ -1008,3 +1008,164 @@ class TestSaleToMediaBuy:
         assert mb.created_at.day == 29
         assert isinstance(mb.updated_at, datetime)
         assert mb.updated_at.day == 30
+
+
+# ── CurationAdapter.list_media_buys Tests ─────────────────────────────────
+
+
+def _make_adapter_with_cap(cap: int = 500):
+    """Helper: build an adapter with a custom max_media_buys_per_list cap."""
+    from src.adapters.curation.adapter import CurationAdapter
+    from src.core.schemas import Principal
+
+    p = Principal(principal_id="p1", name="p", platform_mappings={})
+    return CurationAdapter(
+        config={
+            "sales_service_url": "http://sales.test",
+            "catalog_service_url": "http://catalog.test",
+            "activation_service_url": "http://activation.test",
+            "max_media_buys_per_list": cap,
+        },
+        principal=p,
+        tenant_id="t1",
+    )
+
+
+def _sale_stub(sale_id: str, status: str = "active", buyer_ref: str = "buyer-1") -> dict:
+    """Build a minimal valid sale dict for the converter."""
+    return {
+        "sale_id": sale_id,
+        "buyer_ref": buyer_ref,
+        "buyer_campaign_ref": None,
+        "segments": [{"segment_id": f"seg-{sale_id}"}],
+        "activations": [],
+        "pricing": {"pricing_model": "cpm", "currency": "USD", "floor_price": 1.0},
+        "deal_type": "curated",
+        "platform_id": "magnite",
+        "dsps": [],
+        "ad_format_types": None,
+        "start_time": "2026-04-01T00:00:00Z",
+        "end_time": "2026-04-30T23:59:59Z",
+        "brand": None,
+        "budget": 100.0,
+        "status": status,
+        "created_at": "2026-03-29T10:00:00Z",
+        "updated_at": "2026-03-30T15:00:00Z",
+    }
+
+
+class TestListMediaBuys:
+    def test_empty_result(self):
+        adapter = _make_adapter_with_cap()
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {"items": [], "next_cursor": None}
+            result = adapter.list_media_buys()
+
+        assert result.media_buys == []
+        assert result.truncated is False
+        assert result.total_fetched == 0
+
+    def test_single_page_result(self):
+        adapter = _make_adapter_with_cap()
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {
+                "items": [_sale_stub("s1"), _sale_stub("s2")],
+                "next_cursor": None,
+            }
+            result = adapter.list_media_buys()
+
+        assert result.total_fetched == 2
+        assert result.truncated is False
+        assert [mb.media_buy_id for mb in result.media_buys] == ["s1", "s2"]
+
+    def test_paginates_across_multiple_pages(self):
+        adapter = _make_adapter_with_cap()
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.side_effect = [
+                {"items": [_sale_stub("s1"), _sale_stub("s2")], "next_cursor": "c1"},
+                {"items": [_sale_stub("s3")], "next_cursor": None},
+            ]
+            result = adapter.list_media_buys()
+
+        assert result.total_fetched == 3
+        assert result.truncated is False
+        assert [mb.media_buy_id for mb in result.media_buys] == ["s1", "s2", "s3"]
+        # Verify cursor was passed on second call
+        assert mock_list.call_args_list[1].kwargs["cursor"] == "c1"
+
+    def test_truncates_at_cap(self):
+        adapter = _make_adapter_with_cap(cap=2)
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {
+                "items": [_sale_stub("s1"), _sale_stub("s2")],
+                "next_cursor": "more",
+            }
+            result = adapter.list_media_buys()
+
+        assert result.total_fetched == 2
+        assert result.truncated is True
+
+    def test_not_truncated_when_exactly_at_cap_and_no_more_pages(self):
+        adapter = _make_adapter_with_cap(cap=2)
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {
+                "items": [_sale_stub("s1"), _sale_stub("s2")],
+                "next_cursor": None,
+            }
+            result = adapter.list_media_buys()
+
+        assert result.total_fetched == 2
+        assert result.truncated is False
+
+    def test_cap_of_one_returns_one_item_and_signals_truncation(self):
+        adapter = _make_adapter_with_cap(cap=1)
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {
+                "items": [_sale_stub("s1")],
+                "next_cursor": "more",
+            }
+            result = adapter.list_media_buys()
+
+        assert result.total_fetched == 1
+        assert result.truncated is True
+
+    def test_passes_sale_ids_to_client(self):
+        adapter = _make_adapter_with_cap()
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {"items": [], "next_cursor": None}
+            adapter.list_media_buys(sale_ids=["s1", "s2"])
+
+        assert mock_list.call_args.kwargs["sale_ids"] == ["s1", "s2"]
+
+    def test_passes_buyer_refs_to_client(self):
+        adapter = _make_adapter_with_cap()
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {"items": [], "next_cursor": None}
+            adapter.list_media_buys(buyer_refs=["b1"])
+
+        assert mock_list.call_args.kwargs["buyer_refs"] == ["b1"]
+
+    def test_passes_statuses_to_client(self):
+        adapter = _make_adapter_with_cap()
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            mock_list.return_value = {"items": [], "next_cursor": None}
+            adapter.list_media_buys(statuses=["active", "paused"])
+
+        assert mock_list.call_args.kwargs["statuses"] == ["active", "paused"]
+
+    def test_page_size_respects_remaining_cap(self):
+        """When cap-remaining < page_size, the adapter asks for fewer items."""
+        adapter = _make_adapter_with_cap(cap=150)
+        with patch.object(adapter._sales, "list_sales") as mock_list:
+            # First call: return full page of 100, with next_cursor
+            # Second call: should request only 50 more
+            mock_list.side_effect = [
+                {"items": [_sale_stub(f"s{i}") for i in range(100)], "next_cursor": "c1"},
+                {"items": [_sale_stub(f"t{i}") for i in range(50)], "next_cursor": None},
+            ]
+            result = adapter.list_media_buys()
+
+        assert result.total_fetched == 150
+        assert result.truncated is False
+        # Second call asked for 50 (remaining cap)
+        assert mock_list.call_args_list[1].kwargs["limit"] == 50

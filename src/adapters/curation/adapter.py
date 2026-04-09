@@ -380,6 +380,71 @@ class CurationAdapter(ToolProvider):
     ) -> bool:
         return True
 
+    # ── List media buys (sales → AdCP with pagination + cap) ───────────
+
+    def list_media_buys(
+        self,
+        *,
+        sale_ids: list[str] | None = None,
+        buyer_refs: list[str] | None = None,
+        statuses: list[str] | None = None,
+    ) -> ListMediaBuysResult:
+        """Fetch sales from the Sales service and map to AdCP media buys.
+
+        Paginates the sales service up to ``self._max_media_buys_per_list``.
+        Signals truncation via the returned dataclass so callers can surface
+        a soft ``errors[]`` entry to clients.
+
+        Args:
+            sale_ids: Filter to specific sale IDs. When set, the sales
+                service uses batch_get and does not paginate (single call).
+            buyer_refs: Filter to specific buyer references.
+            statuses: Filter to specific curation sale statuses (not AdCP
+                statuses — caller must translate via ADCP_STATUS_TO_SALE_STATUSES).
+
+        Returns:
+            ListMediaBuysResult with the mapped media buys and a truncation flag.
+        """
+        cap = self._max_media_buys_per_list
+        page_size = min(100, cap)  # sales service hard max is 100
+        cursor: str | None = None
+        all_sales: list[dict] = []
+        truncated = False
+
+        while True:
+            remaining = cap - len(all_sales)
+            if remaining <= 0:
+                # We're at or above cap. If there was a cursor from the last
+                # iteration, there's more data we're skipping.
+                truncated = cursor is not None
+                break
+
+            page = self._sales.list_sales(
+                sale_ids=sale_ids,
+                buyer_refs=buyer_refs,
+                statuses=statuses,
+                limit=min(page_size, remaining),
+                cursor=cursor,
+            )
+            items = page.get("items") or []
+            all_sales.extend(items)
+            cursor = page.get("next_cursor")
+
+            if not cursor:
+                # Exhausted
+                break
+            if len(all_sales) >= cap:
+                # Filled the cap and there's more → truncated
+                truncated = True
+                break
+
+        media_buys = [self._sale_to_media_buy(s) for s in all_sales]
+        return ListMediaBuysResult(
+            media_buys=media_buys,
+            truncated=truncated,
+            total_fetched=len(media_buys),
+        )
+
     # ── Sale → AdCP media buy converter ────────────────────────────────
 
     def _sale_to_media_buy(self, sale: dict) -> GetMediaBuysMediaBuy:
