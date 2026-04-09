@@ -760,6 +760,50 @@ class TestGetMediaBuysCurationEarlyReturn:
         # NOT fall through to get_current_tenant() in production.
         mock_get_principal.assert_called_once_with("p1", tenant_id="t-curation")
 
+    def test_get_adapter_called_with_explicit_tenant(self):
+        """get_adapter must be called with tenant=identity.tenant.
+
+        Regression: without the tenant kwarg, get_adapter falls through to
+        get_current_tenant() inside adapter_helpers.py, which requires
+        tenant context already set at the transport boundary — not available
+        inside _get_media_buys_impl. Same class of bug as
+        get_principal_object without tenant_id.
+        """
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()  # tenant_id="t-curation"
+        mock_adapter = MagicMock()
+        mock_adapter.list_media_buys.return_value = self._make_result()
+        mock_adapter._max_media_buys_per_list = 500
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ) as mock_get_adapter,
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(),
+                identity=identity,
+            )
+
+        # The fix: tenant must be passed explicitly so get_adapter does NOT
+        # fall through to get_current_tenant() in production.
+        call_kwargs = mock_get_adapter.call_args.kwargs
+        assert "tenant" in call_kwargs, (
+            f"get_adapter must be called with tenant= kwarg; got kwargs={list(call_kwargs)}"
+        )
+        assert call_kwargs["tenant"] == identity.tenant
+
     def test_curation_tenant_truncation_appends_errors_entry(self):
         from src.core.schemas import GetMediaBuysRequest
         from src.core.tools.media_buy_list import _get_media_buys_impl
