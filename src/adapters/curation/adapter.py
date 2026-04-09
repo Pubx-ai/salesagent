@@ -91,7 +91,7 @@ class ListMediaBuysResult:
         total_fetched: Number of sales actually converted into media buys.
     """
 
-    media_buys: list["GetMediaBuysMediaBuy"]
+    media_buys: list[GetMediaBuysMediaBuy]
     truncated: bool
     total_fetched: int
 

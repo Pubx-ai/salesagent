@@ -912,10 +912,15 @@ class TestSaleToMediaBuy:
 
     def test_package_prefers_fixed_price_over_floor_price(self):
         adapter = _make_adapter()
-        sale = {**SAMPLE_SALE_DICT, "pricing": {
-            "pricing_model": "cpm", "currency": "USD",
-            "floor_price": 2.50, "fixed_price": 5.00,
-        }}
+        sale = {
+            **SAMPLE_SALE_DICT,
+            "pricing": {
+                "pricing_model": "cpm",
+                "currency": "USD",
+                "floor_price": 2.50,
+                "fixed_price": 5.00,
+            },
+        }
         mb = adapter._sale_to_media_buy(sale)
         for pkg in mb.packages:
             assert pkg.bid_price == 5.00
@@ -948,11 +953,14 @@ class TestSaleToMediaBuy:
 
     def test_segment_without_id_is_skipped(self):
         adapter = _make_adapter()
-        sale = {**SAMPLE_SALE_DICT, "segments": [
-            {"segment_id": "seg-red"},
-            {},  # missing segment_id
-            {"segment_id": "seg-blue"},
-        ]}
+        sale = {
+            **SAMPLE_SALE_DICT,
+            "segments": [
+                {"segment_id": "seg-red"},
+                {},  # missing segment_id
+                {"segment_id": "seg-blue"},
+            ],
+        }
         mb = adapter._sale_to_media_buy(sale)
         assert [pkg.package_id for pkg in mb.packages] == ["seg-red", "seg-blue"]
 
@@ -986,12 +994,19 @@ class TestSaleToMediaBuy:
     def test_per_segment_pricing_override_forward_compat(self):
         """Forward-compatibility: if segment has pricing, it wins."""
         adapter = _make_adapter()
-        sale = {**SAMPLE_SALE_DICT, "segments": [
-            {"segment_id": "seg-red", "pricing": {
-                "fixed_price": 9.99, "currency": "USD",
-            }},
-            {"segment_id": "seg-blue"},  # uses sale-level
-        ]}
+        sale = {
+            **SAMPLE_SALE_DICT,
+            "segments": [
+                {
+                    "segment_id": "seg-red",
+                    "pricing": {
+                        "fixed_price": 9.99,
+                        "currency": "USD",
+                    },
+                },
+                {"segment_id": "seg-blue"},  # uses sale-level
+            ],
+        }
         mb = adapter._sale_to_media_buy(sale)
         assert mb.packages[0].bid_price == 9.99
         assert mb.packages[1].bid_price == 2.50  # sale-level floor

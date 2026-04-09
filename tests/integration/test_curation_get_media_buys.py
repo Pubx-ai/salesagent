@@ -7,12 +7,11 @@ Mocks the curation sales service at the HTTP level via httpx.MockTransport
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 from unittest.mock import patch
 
 import httpx
 import pytest
-
 
 # Capture the real httpx.Client at import time so _make_mock_client_factory
 # can call it without being intercepted by the patch that replaces

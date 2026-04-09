@@ -504,6 +504,7 @@ class TestGetMediaBuysCurationEarlyReturn:
 
     def _make_result(self, count: int = 0, truncated: bool = False):
         from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
         from src.adapters.curation.adapter import ListMediaBuysResult
         from src.core.schemas import GetMediaBuysMediaBuy
 
@@ -565,6 +566,7 @@ class TestGetMediaBuysCurationEarlyReturn:
 
     def test_curation_tenant_translates_single_status_filter(self):
         from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
         from src.core.schemas import GetMediaBuysRequest
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
@@ -625,6 +627,7 @@ class TestGetMediaBuysCurationEarlyReturn:
 
     def test_curation_tenant_translates_completed_to_multiple_sale_statuses(self):
         from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
         from src.core.schemas import GetMediaBuysRequest
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
@@ -724,9 +727,7 @@ class TestGetMediaBuysCurationEarlyReturn:
 
         identity = self._make_identity()
         mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result(
-            count=500, truncated=True
-        )
+        mock_adapter.list_media_buys.return_value = self._make_result(count=500, truncated=True)
         mock_adapter._max_media_buys_per_list = 500
 
         with (
@@ -755,6 +756,7 @@ class TestGetMediaBuysCurationEarlyReturn:
 
     def test_curation_tenant_include_snapshot_sets_unsupported(self):
         from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
         from src.adapters.curation.adapter import ListMediaBuysResult
         from src.core.schemas import (
             GetMediaBuysMediaBuy,
