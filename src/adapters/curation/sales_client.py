@@ -39,3 +39,40 @@ class SalesClient(CurationHttpClient):
             Updated sale response dict.
         """
         return self._request("PATCH", f"/api/v1/sales/{sale_id}", json=update_data)
+
+    def list_sales(
+        self,
+        *,
+        status: str | None = None,
+        statuses: list[str] | None = None,
+        sale_ids: list[str] | None = None,
+        buyer_refs: list[str] | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List sales with optional filters. Returns a single page.
+
+        Args:
+            status: Legacy single-value status filter.
+            statuses: Multi-value status filter (wins over ``status`` if both set).
+            sale_ids: Filter to specific sale IDs (primary-key lookup).
+            buyer_refs: Filter to specific buyer references.
+            limit: Max items per page (sales service max is 100).
+            cursor: Opaque pagination cursor from a prior response.
+
+        Returns:
+            dict with keys ``items`` (list of sale dicts) and ``next_cursor``
+            (str or None when no more pages).
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if status:
+            params["status"] = status
+        if statuses:
+            params["statuses"] = statuses
+        if sale_ids:
+            params["sale_ids"] = sale_ids
+        if buyer_refs:
+            params["buyer_refs"] = buyer_refs
+        return self._request("GET", "/api/v1/sales", params=params)

@@ -667,3 +667,63 @@ class TestStatusMapping:
         assert ACTION_TO_ADCP_STATUS["pause"] == "paused"
         assert ACTION_TO_ADCP_STATUS["resume"] == "active"
         assert ACTION_TO_ADCP_STATUS["cancel"] == "completed"
+
+
+# ── SalesClient.list_sales Tests ─────────────────────────────────────────
+
+
+class TestSalesClientListSales:
+    """SalesClient.list_sales() wraps the /api/v1/sales GET endpoint."""
+
+    def test_list_sales_passes_filters_as_query_params(self):
+        from src.adapters.curation.sales_client import SalesClient
+
+        client = SalesClient(base_url="http://test")
+        with patch.object(client, "_request") as mock_request:
+            mock_request.return_value = {"items": [], "next_cursor": None}
+            client.list_sales(
+                status="active",
+                statuses=["active", "paused"],
+                sale_ids=["s1", "s2"],
+                buyer_refs=["b1"],
+                limit=50,
+                cursor="tok",
+            )
+
+        mock_request.assert_called_once_with(
+            "GET",
+            "/api/v1/sales",
+            params={
+                "limit": 50,
+                "cursor": "tok",
+                "status": "active",
+                "statuses": ["active", "paused"],
+                "sale_ids": ["s1", "s2"],
+                "buyer_refs": ["b1"],
+            },
+        )
+
+    def test_list_sales_omits_none_filters(self):
+        from src.adapters.curation.sales_client import SalesClient
+
+        client = SalesClient(base_url="http://test")
+        with patch.object(client, "_request") as mock_request:
+            mock_request.return_value = {"items": [], "next_cursor": None}
+            client.list_sales(limit=20)
+
+        mock_request.assert_called_once_with(
+            "GET",
+            "/api/v1/sales",
+            params={"limit": 20},
+        )
+
+    def test_list_sales_returns_raw_dict(self):
+        from src.adapters.curation.sales_client import SalesClient
+
+        client = SalesClient(base_url="http://test")
+        expected = {"items": [{"sale_id": "s1"}], "next_cursor": "next"}
+        with patch.object(client, "_request") as mock_request:
+            mock_request.return_value = expected
+            result = client.list_sales()
+
+        assert result == expected
