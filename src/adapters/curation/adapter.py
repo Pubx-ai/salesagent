@@ -194,29 +194,53 @@ class CurationAdapter(ToolProvider):
         package_pricing_info: dict[str, dict] | None = None,
     ) -> CreateMediaBuyResponse:
         """Create a sale + activation in curation services."""
+        # Log the full request input for debugging
+        brand = getattr(request, "brand", None)
         logger.info(
-            "create_media_buy input: buyer_ref=%s, brand=%s, packages=%d, start=%s, end=%s, "
-            "pricing_info_keys=%s, ext_keys=%s",
+            "create_media_buy input: buyer_ref=%s, brand=%r, start=%s, end=%s, "
+            "po_number=%s, account=%s, packages=%d, ext=%s",
             request.buyer_ref,
-            getattr(getattr(request, "brand", None), "domain", None),
-            len(packages),
+            {"domain": getattr(brand, "domain", None)} if brand else None,
             start_time,
             end_time,
-            list((package_pricing_info or {}).keys()),
-            list(_ext_as_dict(request).keys()),
+            getattr(request, "po_number", None),
+            getattr(request, "account", None),
+            len(packages),
+            _ext_as_dict(request) or None,
         )
         for i, pkg in enumerate(packages):
+            targeting = getattr(pkg, "targeting_overlay", None)
+            targeting_summary = None
+            if targeting:
+                if isinstance(targeting, dict):
+                    targeting_summary = targeting
+                elif hasattr(targeting, "model_dump"):
+                    targeting_summary = targeting.model_dump(mode="json", exclude_none=True)
             logger.info(
-                "  package[%d]: product_id=%s, budget=%s, cpm=%s, format_ids=%s, "
-                "creative_ids=%s, targeting=%s",
+                "  package[%d]: product_id=%s, budget=%s, bid_price=%s, cpm=%s, "
+                "format_ids=%s, creative_ids=%s, targeting_overlay=%s",
                 i,
                 pkg.product_id,
                 pkg.budget,
+                pkg.cpm if pkg.cpm else None,
                 pkg.cpm,
                 [getattr(f, "id", f) for f in (pkg.format_ids or [])],
                 getattr(pkg, "creative_ids", None),
-                "yes" if getattr(pkg, "targeting_overlay", None) else "no",
+                targeting_summary,
             )
+        # Log raw package_pricing_info for pricing resolution tracing
+        if package_pricing_info:
+            for pkg_id, info in package_pricing_info.items():
+                logger.info(
+                    "  pricing[%s]: rate=%s, bid_price=%s, currency=%s, "
+                    "pricing_option_id=%s, is_fixed=%s",
+                    pkg_id,
+                    info.get("rate"),
+                    info.get("bid_price"),
+                    info.get("currency"),
+                    info.get("pricing_option_id"),
+                    info.get("is_fixed"),
+                )
 
         ext_dict = _ext_as_dict(request)
         use_deal = ext_dict.get("sale_type") == "deal" or bool(_extract_dsps_from_ext(request))
@@ -226,6 +250,9 @@ class CurationAdapter(ToolProvider):
         else:
             sale_data = self._build_campaign_sale_data(request, packages, start_time, end_time, package_pricing_info)
 
+        import json as _json
+
+        logger.info("Sale payload to send: %s", _json.dumps(sale_data, default=str))
         sale_resp = self._sales.create_sale(sale_data)
         sale_id = sale_resp.get("sale_id")
         if not sale_id:
