@@ -208,18 +208,10 @@ class CurationAdapter(ToolProvider):
             raise AdCPAdapterError("Sales service did not return a sale_id")
         logger.info("Created sale %s (%s) in Sales service", sale_id, sale_data.get("sale_type", "deal"))
 
-        # _activate_deal will be replaced in Task 4. For now, keep calling it
-        # but pass extracted values to allow the method to branch on sale_type.
-        ssp_deal_id = self._activate_deal(
-            sale_id,
-            _extract_pricing(package_pricing_info),
-            _extract_dsps_from_ext(request) or [{"seat_id": "default", "dsp_name": "Default DSP"}],
-            start_time,
-            end_time,
-        )
+        activation_id = self._activate_sale(sale_id, sale_data)
 
         pkg_responses = [
-            ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=ssp_deal_id is None)
+            ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=activation_id is None)
             for p in packages
         ]
         creative_deadline = datetime.now(UTC) + timedelta(days=2)
@@ -328,68 +320,88 @@ class CurationAdapter(ToolProvider):
             sale_data["budget"] = float(budget)
         return sale_data
 
-    def _activate_deal(
-        self,
-        sale_id: str,
-        pricing_info: dict[str, Any],
-        dsps: list[dict[str, Any]],
-        start_time: datetime,
-        end_time: datetime,
-    ) -> str | None:
-        """Activate a deal via the Activation service, or mock it.
+    def _activate_sale(self, sale_id: str, sale_data: dict[str, Any]) -> str | None:
+        """Activate a sale via the Activation service, or mock it.
 
-        Returns the SSP deal_id on success, None on failure.
+        Returns an activation identifier on success, None on failure.
         Updates the sale status in the Sales service if activation succeeds.
         """
-        ssp_deal_id: str | None = None
+        is_campaign = sale_data.get("sale_type") == "campaign"
+        activation_id: str | None = None
 
         if self._mock_activation:
             import uuid
 
-            ssp_deal_id = f"mock-deal-{uuid.uuid4().hex[:8]}"
-            logger.info("Mock activation for sale %s: deal_id=%s", sale_id, ssp_deal_id)
+            mock_id = f"mock-{uuid.uuid4().hex[:8]}"
+            activation_id = mock_id
+            logger.info("Mock activation for sale %s: id=%s", sale_id, mock_id)
+
+            if is_campaign:
+                activation_record: dict[str, Any] = {
+                    "activation_id": mock_id,
+                    "activation_target": "GAM",
+                    "gam_network_code": "mock-network",
+                    "gam_order_id": f"mock-order-{uuid.uuid4().hex[:6]}",
+                    "segments": [],
+                    "status": "active",
+                }
+            else:
+                dsps = sale_data.get("dsps") or []
+                dsp_label = ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name"))
+                activation_record = {
+                    "activation_id": mock_id,
+                    "ssp_name": "magnite",
+                    "dsp_name": dsp_label,
+                    "deal_id": mock_id,
+                    "status": "active",
+                }
         else:
             try:
-                activation_price = pricing_info.get("fixed_price") or pricing_info.get("floor_price") or 0
-                act_result = self._activation.create_activation(
-                    {
-                        "sale_id": sale_id,
-                        "ssp_name": "magnite",
-                        "start_date": start_time.isoformat(),
-                        "end_date": end_time.isoformat(),
-                        "price": {"amount": activation_price, "currency": pricing_info.get("currency", "USD")},
+                act_result = self._activation.create_activation(sale_id)
+                activations = act_result.get("activations") or []
+
+                if not activations:
+                    logger.warning("Activation returned no results for sale %s", sale_id)
+                    return None
+
+                act_resp = activations[0]
+                activation_id = act_resp.get("activation_id")
+                metadata = act_resp.get("metadata") or {}
+
+                if is_campaign or act_resp.get("ssp_name") == "gam":
+                    activation_record = {
+                        "activation_id": activation_id,
+                        "activation_target": metadata.get("activation_target", "GAM"),
+                        "gam_network_code": metadata.get("gam_network_code", ""),
+                        "gam_order_id": metadata.get("gam_order_id"),
+                        "segments": metadata.get("segments", []),
+                        "status": act_resp.get("status", "active"),
                     }
-                )
-
-                activations = act_result.get("activations", [])
-                if activations:
-                    ssp_deal_id = activations[0].get("deal_id")
-                    logger.info("Activation created: deal_id=%s", ssp_deal_id)
+                else:
+                    dsps = sale_data.get("dsps") or []
+                    dsp_label = ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name"))
+                    activation_record = {
+                        "activation_id": activation_id or f"act-{sale_id}",
+                        "ssp_name": act_resp.get("ssp_name", "magnite"),
+                        "dsp_name": dsp_label,
+                        "deal_id": act_resp.get("deal_id"),
+                        "status": act_resp.get("status", "active"),
+                    }
+                logger.info("Activation created for sale %s: %s", sale_id, activation_id)
             except Exception:
-                logger.exception("Activation failed for sale %s, deal will be pending_activation", sale_id)
+                logger.exception("Activation failed for sale %s", sale_id)
+                return None
 
-        if ssp_deal_id:
-            dsp_label = ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name"))
-            try:
-                self._sales.update_sale(
-                    sale_id,
-                    {
-                        "status": "active",
-                        "activations": [
-                            {
-                                "activation_id": f"act-{sale_id}",
-                                "ssp_name": "magnite",
-                                "dsp_name": dsp_label,
-                                "deal_id": ssp_deal_id,
-                                "status": "active",
-                            }
-                        ],
-                    },
-                )
-            except Exception:
-                logger.warning("Failed to update sale %s status after activation", sale_id, exc_info=True)
+        # Update sale with activation record
+        try:
+            self._sales.update_sale(
+                sale_id,
+                {"status": "active", "activations": [activation_record]},
+            )
+        except Exception:
+            logger.warning("Failed to update sale %s after activation", sale_id, exc_info=True)
 
-        return ssp_deal_id
+        return activation_id
 
     # ── Check status ───────────────────────────────────────────────────
 

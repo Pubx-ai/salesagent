@@ -432,7 +432,9 @@ class TestCurationAdapterCreateMediaBuy:
         adapter = _make_adapter()
 
         adapter._sales.create_sale = MagicMock(return_value={"sale_id": "sale-123"})
-        adapter._activation.create_activation = MagicMock(return_value={"activations": [{"deal_id": "deal-abc"}]})
+        adapter._activation.create_activation = MagicMock(
+            return_value={"activations": [{"activation_id": "act-1", "deal_id": "deal-abc", "status": "active"}]}
+        )
         adapter._sales.update_sale = MagicMock(return_value={})
 
         from src.core.schemas import CreateMediaBuyRequest, CreateMediaBuySuccess, MediaPackage
@@ -1287,7 +1289,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1306,7 +1308,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1327,7 +1329,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1354,7 +1356,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1379,7 +1381,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1399,7 +1401,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1419,7 +1421,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1440,7 +1442,7 @@ class TestCreateMediaBuyCampaignPayload:
         with (
             patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
             patch.object(  # noqa: E501
-                adapter, "_activate_deal", return_value="mock-deal-1"
+                adapter, "_activate_sale", return_value="mock-act-1"
             ),
         ):
             adapter.create_media_buy(
@@ -1451,3 +1453,132 @@ class TestCreateMediaBuyCampaignPayload:
         assert "campaign_meta" not in sale_data
         assert sale_data["deal_type"] == "curated"
         assert "sale_type" not in sale_data
+
+
+# ── _activate_sale Tests ────────────────────────────────────────────────────
+
+
+class TestActivateSale:
+    """Tests for _activate_sale which handles both campaign and deal activation."""
+
+    def test_sends_only_sale_id_to_activation_service(self):
+        """create_activation receives just the sale_id string, not a dict."""
+        adapter = _make_adapter()
+        adapter._activation.create_activation = MagicMock(
+            return_value={
+                "activations": [{"activation_id": "act-1", "deal_id": "d1", "status": "active"}],
+            }
+        )
+        adapter._sales.update_sale = MagicMock(return_value={})
+
+        sale_data = {"dsps": [{"seat_id": "s1", "dsp_name": "DSP"}]}
+        adapter._activate_sale("sale-1", sale_data)
+
+        adapter._activation.create_activation.assert_called_once_with("sale-1")
+
+    def test_campaign_activation_updates_sale_with_gam_record(self):
+        """Campaign activation builds a GAM-style activation record."""
+        adapter = _make_adapter()
+        adapter._activation.create_activation = MagicMock(
+            return_value={
+                "activations": [
+                    {
+                        "activation_id": "act-gam-1",
+                        "ssp_name": "gam",
+                        "status": "active",
+                        "metadata": {
+                            "activation_target": "GAM",
+                            "gam_network_code": "12345",
+                            "gam_order_id": "order-99",
+                            "segments": [{"id": "seg-1"}],
+                        },
+                    }
+                ],
+            }
+        )
+        adapter._sales.update_sale = MagicMock(return_value={})
+
+        sale_data = {"sale_type": "campaign"}
+        result = adapter._activate_sale("sale-c1", sale_data)
+
+        assert result == "act-gam-1"
+        update_call = adapter._sales.update_sale.call_args
+        assert update_call[0][0] == "sale-c1"
+        activation = update_call[0][1]["activations"][0]
+        assert activation["activation_target"] == "GAM"
+        assert activation["gam_network_code"] == "12345"
+        assert activation["gam_order_id"] == "order-99"
+        assert activation["segments"] == [{"id": "seg-1"}]
+        assert activation["status"] == "active"
+
+    def test_deal_activation_updates_sale_with_deal_record(self):
+        """Deal activation builds a Magnite-style activation record."""
+        adapter = _make_adapter()
+        adapter._activation.create_activation = MagicMock(
+            return_value={
+                "activations": [
+                    {
+                        "activation_id": "act-mag-1",
+                        "ssp_name": "magnite",
+                        "deal_id": "deal-xyz",
+                        "status": "active",
+                    }
+                ],
+            }
+        )
+        adapter._sales.update_sale = MagicMock(return_value={})
+
+        sale_data = {"dsps": [{"seat_id": "s1", "dsp_name": "StackAdapt"}]}
+        result = adapter._activate_sale("sale-d1", sale_data)
+
+        assert result == "act-mag-1"
+        update_call = adapter._sales.update_sale.call_args
+        activation = update_call[0][1]["activations"][0]
+        assert activation["ssp_name"] == "magnite"
+        assert activation["dsp_name"] == "StackAdapt"
+        assert activation["deal_id"] == "deal-xyz"
+        assert activation["status"] == "active"
+
+    def test_activation_failure_returns_none(self):
+        """Exception from create_activation -> returns None, no update_sale call."""
+        adapter = _make_adapter()
+        adapter._activation.create_activation = MagicMock(side_effect=Exception("Service down"))
+        adapter._sales.update_sale = MagicMock(return_value={})
+
+        sale_data = {"dsps": []}
+        result = adapter._activate_sale("sale-fail", sale_data)
+
+        assert result is None
+        adapter._sales.update_sale.assert_not_called()
+
+    def test_empty_activations_returns_none(self):
+        """Empty activations list -> returns None, no update_sale call."""
+        adapter = _make_adapter()
+        adapter._activation.create_activation = MagicMock(
+            return_value={"activations": []},
+        )
+        adapter._sales.update_sale = MagicMock(return_value={})
+
+        sale_data = {"dsps": []}
+        result = adapter._activate_sale("sale-empty", sale_data)
+
+        assert result is None
+        adapter._sales.update_sale.assert_not_called()
+
+    def test_mock_activation_campaign(self):
+        """mock_activation=True with campaign sale_type -> mock GAM record."""
+        adapter = _make_adapter()
+        adapter._mock_activation = True
+        adapter._sales.update_sale = MagicMock(return_value={})
+
+        sale_data = {"sale_type": "campaign"}
+        result = adapter._activate_sale("sale-mock-c", sale_data)
+
+        assert result is not None
+        assert result.startswith("mock-")
+        update_call = adapter._sales.update_sale.call_args
+        activation = update_call[0][1]["activations"][0]
+        assert activation["activation_target"] == "GAM"
+        assert activation["gam_network_code"] == "mock-network"
+        assert "gam_order_id" in activation
+        assert activation["status"] == "active"
