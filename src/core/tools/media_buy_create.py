@@ -145,6 +145,7 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
         bid_price = getattr(pkg, "bid_price", None)
         budget = getattr(pkg, "budget", None)
         creative_ids = getattr(pkg, "creative_ids", None)
+        creatives = getattr(pkg, "creatives", None)
         targeting_overlay = getattr(pkg, "targeting_overlay", None)
 
         # Use format_ids from the request package if available, else default

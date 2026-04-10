@@ -1460,7 +1460,9 @@ class TestCreateMediaBuyCampaignPayload:
         sale_data = mock_create.call_args[0][0]
         seg = sale_data["segments"][0]
         assert seg["budget"] == 500.0
-        assert seg["pricing_info"] == {"rate": 3.50, "currency": "EUR"}
+        assert seg["pricing_info"]["rate"] == 3.50
+        assert seg["pricing_info"]["currency"] == "EUR"
+        assert seg["pricing_info"]["pricing_model"] == "cpm"
 
     def test_campaign_segment_has_ad_format_types(self):
         """ad_format_types extracted from package format_ids."""

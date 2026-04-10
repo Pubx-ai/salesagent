@@ -237,11 +237,24 @@ class CurationAdapter(ToolProvider):
         if brand:
             brand_domain = getattr(brand, "domain", "") or ""
 
+        # Build a lookup from product_id → request package for fields not on MediaPackage
+        req_pkg_by_product: dict[str, Any] = {}
+        for req_pkg in request.packages or []:
+            pid = getattr(req_pkg, "product_id", None)
+            if pid:
+                req_pkg_by_product[pid] = req_pkg
+
         segments: list[dict[str, Any]] = []
         for pkg in packages:
             pricing_info_dict = (package_pricing_info or {}).get(pkg.package_id, {})
             rate = pricing_info_dict.get("rate") or pricing_info_dict.get("bid_price")
             currency = pricing_info_dict.get("currency", "USD")
+            pricing_model = pricing_info_dict.get("pricing_model", "cpm")
+            is_fixed = pricing_info_dict.get("is_fixed", False)
+
+            # Get pricing_option_id from the original request package
+            orig_pkg = req_pkg_by_product.get(pkg.product_id or "")
+            pricing_option_id = getattr(orig_pkg, "pricing_option_id", None) if orig_pkg else None
 
             ad_format_types: list[str] = []
             for fmt in getattr(pkg, "format_ids", None) or []:
@@ -258,12 +271,20 @@ class CurationAdapter(ToolProvider):
                 elif hasattr(targeting, "model_dump"):
                     targeting_overlay = targeting.model_dump(mode="json", exclude_none=True)
 
-            # Serialize creative_assignments from package creative_ids
-            creative_assignments: list[dict[str, Any]] = []
-            pkg_creative_ids = getattr(pkg, "creative_ids", None)
-            if pkg_creative_ids:
-                for cid in pkg_creative_ids:
-                    creative_assignments.append({"creative_id": cid})
+            # Build creative_assignments from request package creatives (full objects)
+            # or fall back to creative_ids (string references)
+            creative_assignments = _build_creative_assignments(pkg, orig_pkg)
+
+            # Build pricing_info with all fields
+            pricing_info: dict[str, Any] | None = None
+            if rate:
+                pricing_info = {"rate": float(rate), "currency": currency}
+                if pricing_model:
+                    pricing_info["pricing_model"] = pricing_model
+                if pricing_option_id:
+                    pricing_info["pricing_option_id"] = pricing_option_id
+                if is_fixed:
+                    pricing_info["is_fixed"] = is_fixed
 
             segments.append(
                 {
@@ -273,21 +294,32 @@ class CurationAdapter(ToolProvider):
                     "domains": [],
                     "ad_format_types": ad_format_types,
                     "budget": float(pkg.budget) if pkg.budget else None,
-                    "pricing_info": {"rate": float(rate), "currency": currency} if rate else None,
+                    "pricing_info": pricing_info,
                     "creative_assignments": creative_assignments,
                     "publishers": [],
                     "targeting_overlay": targeting_overlay,
                 }
             )
 
+        # Build campaign_meta with optional po_number and account_id
+        campaign_meta: dict[str, Any] = {
+            "order_name": f"{brand_domain}-{request.buyer_ref or 'unknown'}",
+            "media_buy_id": "",
+        }
+        po_number = getattr(request, "po_number", None)
+        if po_number:
+            campaign_meta["po_number"] = po_number
+        account = getattr(request, "account", None)
+        if account:
+            account_id = getattr(account, "account_id", None) or getattr(account, "id", None)
+            if account_id:
+                campaign_meta["account_id"] = str(account_id)
+
         sale_data: dict[str, Any] = {
             "sale_type": "campaign",
             "buyer_ref": request.buyer_ref or "unknown",
             "buyer_campaign_ref": request.buyer_ref or "",
-            "campaign_meta": {
-                "order_name": f"{brand_domain}-{request.buyer_ref or 'unknown'}",
-                "media_buy_id": "",
-            },
+            "campaign_meta": campaign_meta,
             "segments": segments,
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
@@ -695,3 +727,58 @@ def _extract_dsps_from_ext(request: CreateMediaBuyRequest) -> list[dict[str, Any
     if dsps_from_ext and isinstance(dsps_from_ext, list):
         return dsps_from_ext
     return None
+
+
+def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list[dict[str, Any]]:
+    """Build creative_assignments array for a campaign segment.
+
+    Prefers full creative objects from the original request package (which have
+    format_id, agent_url, tag, status, name) over bare creative_ids (which only
+    have the ID string).
+
+    AdCP spec: packages can carry ``creatives`` (inline full objects) or
+    ``creative_assignments`` (references to library creatives). Both paths
+    are mapped to the sales service's creative_assignments array.
+    """
+    assignments: list[dict[str, Any]] = []
+
+    # Path 1: Full creative objects from request package (has tag, format_id, etc.)
+    if orig_pkg:
+        creatives = getattr(orig_pkg, "creatives", None)
+        if creatives:
+            for c in creatives:
+                entry: dict[str, Any] = {}
+                entry["creative_id"] = getattr(c, "creative_id", None) or ""
+                fmt = getattr(c, "format_id", None)
+                if fmt:
+                    entry["format_id"] = fmt.get("id") if isinstance(fmt, dict) else getattr(fmt, "id", str(fmt))
+                name = getattr(c, "name", None)
+                if name:
+                    entry["name"] = name
+                # tag may be in assets or as a direct field
+                tag = getattr(c, "tag", None)
+                if tag:
+                    entry["tag"] = tag
+                assets = getattr(c, "assets", None)
+                if assets:
+                    entry["assets"] = assets if isinstance(assets, dict) else (
+                        assets.model_dump(mode="json") if hasattr(assets, "model_dump") else {}
+                    )
+                status = getattr(c, "status", None)
+                if status:
+                    entry["status"] = str(status.value) if hasattr(status, "value") else str(status)
+                agent_url = None
+                if fmt:
+                    agent_url = fmt.get("agent_url") if isinstance(fmt, dict) else getattr(fmt, "agent_url", None)
+                if agent_url:
+                    entry["agent_url"] = agent_url
+                assignments.append(entry)
+            return assignments
+
+    # Path 2: Bare creative_ids from MediaPackage (ID-only references)
+    pkg_creative_ids = getattr(pkg, "creative_ids", None)
+    if pkg_creative_ids:
+        for cid in pkg_creative_ids:
+            assignments.append({"creative_id": cid})
+
+    return assignments
