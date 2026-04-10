@@ -131,9 +131,11 @@ from src.services.activity_feed import activity_feed
 
 
 def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[MediaPackage]:
-    """Build simplified MediaPackage list from request for external adapters.
+    """Build MediaPackage list from request for external adapters.
 
     Used by adapters with manages_own_persistence=True that bypass Postgres.
+    Passes through budget, format_ids, targeting_overlay, and creative_ids
+    so the adapter can build rich sale payloads (e.g. campaign segments).
     """
     from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
 
@@ -141,6 +143,17 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
     for i, pkg in enumerate(req.packages or []):
         product_id = getattr(pkg, "product_id", "unknown")
         bid_price = getattr(pkg, "bid_price", None)
+        budget = getattr(pkg, "budget", None)
+        creative_ids = getattr(pkg, "creative_ids", None)
+        targeting_overlay = getattr(pkg, "targeting_overlay", None)
+
+        # Use format_ids from the request package if available, else default
+        pkg_format_ids = getattr(pkg, "format_ids", None)
+        if pkg_format_ids:
+            format_ids = list(pkg_format_ids)
+        else:
+            format_ids = [LibraryFormatId(id="display_banner", agent_url="https://creative.adcontextprotocol.org")]
+
         packages.append(
             MediaPackage(
                 package_id=getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}",
@@ -148,9 +161,12 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
                 delivery_type="non_guaranteed",
                 cpm=float(bid_price) if bid_price else 0.0,
                 impressions=0,
-                format_ids=[LibraryFormatId(id="display_banner", agent_url="https://creative.adcontextprotocol.org")],
+                format_ids=format_ids,
                 product_id=product_id,
                 buyer_ref=getattr(pkg, "buyer_ref", None),
+                budget=float(budget) if budget else None,
+                creative_ids=creative_ids,
+                targeting_overlay=targeting_overlay,
             )
         )
     return packages

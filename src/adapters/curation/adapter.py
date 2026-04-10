@@ -361,7 +361,10 @@ class CurationAdapter(ToolProvider):
                 activations = act_result.get("activations") or []
 
                 if not activations:
-                    logger.warning("Activation returned no results for sale %s", sale_id)
+                    errors = act_result.get("errors")
+                    logger.warning(
+                        "Activation returned no results for sale %s, errors: %s", sale_id, errors
+                    )
                     return None
 
                 act_resp = activations[0]
