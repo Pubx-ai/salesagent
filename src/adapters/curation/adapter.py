@@ -249,13 +249,21 @@ class CurationAdapter(ToolProvider):
                 if fmt_id:
                     ad_format_types.append(str(fmt_id))
 
-            # Extract frequency_cap from targeting_overlay if present
-            frequency_cap = None
+            # Serialize targeting_overlay (includes geo, device, browser, frequency_cap)
+            targeting_overlay = None
             targeting = getattr(pkg, "targeting_overlay", None)
             if targeting:
-                fc = getattr(targeting, "frequency_cap", None) if not isinstance(targeting, dict) else targeting.get("frequency_cap")
-                if fc:
-                    frequency_cap = fc if isinstance(fc, dict) else fc.model_dump(mode="json") if hasattr(fc, "model_dump") else None
+                if isinstance(targeting, dict):
+                    targeting_overlay = targeting
+                elif hasattr(targeting, "model_dump"):
+                    targeting_overlay = targeting.model_dump(mode="json", exclude_none=True)
+
+            # Serialize creative_assignments from package creative_ids
+            creative_assignments: list[dict[str, Any]] = []
+            pkg_creative_ids = getattr(pkg, "creative_ids", None)
+            if pkg_creative_ids:
+                for cid in pkg_creative_ids:
+                    creative_assignments.append({"creative_id": cid})
 
             segments.append(
                 {
@@ -266,9 +274,9 @@ class CurationAdapter(ToolProvider):
                     "ad_format_types": ad_format_types,
                     "budget": float(pkg.budget) if pkg.budget else None,
                     "pricing_info": {"rate": float(rate), "currency": currency} if rate else None,
-                    "creative_assignments": [],
+                    "creative_assignments": creative_assignments,
                     "publishers": [],
-                    "frequency_cap": frequency_cap,
+                    "targeting_overlay": targeting_overlay,
                 }
             )
 
