@@ -621,21 +621,21 @@ class TestHelperFunctions:
         assert result["currency"] == "EUR"
         assert result["floor_price"] == 2.5
 
-    def test_extract_dsps_default(self):
-        from src.adapters.curation.adapter import _extract_dsps
+    def test_extract_dsps_from_ext_returns_none_when_absent(self):
+        from src.adapters.curation.adapter import _extract_dsps_from_ext
 
         req = MagicMock()
         req.ext = None
-        result = _extract_dsps(req)
-        assert len(result) == 1
-        assert result[0]["seat_id"] == "default"
+        result = _extract_dsps_from_ext(req)
+        assert result is None
 
-    def test_extract_dsps_from_ext(self):
-        from src.adapters.curation.adapter import _extract_dsps
+    def test_extract_dsps_from_ext_returns_list_when_present(self):
+        from src.adapters.curation.adapter import _extract_dsps_from_ext
 
         req = MagicMock()
         req.ext = {"dsps": [{"seat_id": "SA-123", "dsp_name": "StackAdapt"}]}
-        result = _extract_dsps(req)
+        result = _extract_dsps_from_ext(req)
+        assert result is not None
         assert len(result) == 1
         assert result[0]["seat_id"] == "SA-123"
 
@@ -1231,3 +1231,223 @@ class TestListMediaBuys:
         assert result.truncated is False
         # Second call asked for 50 (remaining cap)
         assert mock_list.call_args_list[1].kwargs["limit"] == 50
+
+
+# ── CurationAdapter.create_media_buy Campaign Payload Tests ──────────────
+
+
+class TestCreateMediaBuyCampaignPayload:
+    """Tests for the campaign-vs-deal payload construction in create_media_buy."""
+
+    def _make_request(self, buyer_ref="buyer-1", brand_domain="example.com", ext=None, budget=None):
+        from src.core.schemas import CreateMediaBuyRequest
+
+        kwargs = {
+            "buyer_ref": buyer_ref,
+            "brand": {"domain": brand_domain},
+            "start_time": "asap",
+            "end_time": "2026-06-01T00:00:00Z",
+        }
+        if ext is not None:
+            kwargs["ext"] = ext
+        if budget is not None:
+            kwargs["budget"] = budget
+        return CreateMediaBuyRequest(**kwargs)
+
+    def _make_packages(self, count=1, with_budget=True, with_formats=False):
+        from adcp.types import FormatId as LibraryFormatId
+
+        from src.core.schemas import MediaPackage
+
+        pkgs = []
+        for i in range(count):
+            fmt_ids = []
+            if with_formats:
+                fmt_ids = [LibraryFormatId(id=f"display_300x250_{i}", agent_url="http://test.local/formats")]
+            pkgs.append(
+                MediaPackage(
+                    package_id=f"pkg-{i}",
+                    product_id=f"prod-{i}",
+                    name=f"Package {i}",
+                    delivery_type="non_guaranteed",
+                    cpm=2.0,
+                    impressions=10000,
+                    format_ids=fmt_ids,
+                    budget=500.0 if with_budget else None,
+                )
+            )
+        return pkgs
+
+    def test_default_sale_type_is_campaign(self):
+        """No DSPs in ext -> sale_data['sale_type'] == 'campaign'."""
+        adapter = _make_adapter()
+        request = self._make_request()
+        packages = self._make_packages()
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        assert sale_data["sale_type"] == "campaign"
+
+    def test_campaign_payload_has_campaign_meta(self):
+        """Campaign payload includes campaign_meta with order_name and empty media_buy_id."""
+        adapter = _make_adapter()
+        request = self._make_request(buyer_ref="buy-99", brand_domain="acme.com")
+        packages = self._make_packages()
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        assert "campaign_meta" in sale_data
+        assert sale_data["campaign_meta"]["order_name"] == "acme.com-buy-99"
+        assert sale_data["campaign_meta"]["media_buy_id"] == ""
+
+    def test_campaign_segments_have_package_and_product_ids(self):
+        """Each segment has segment_id == package_id == product_id == pkg.product_id."""
+        adapter = _make_adapter()
+        request = self._make_request()
+        packages = self._make_packages(count=2)
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        segments = sale_data["segments"]
+        assert len(segments) == 2
+        for i, seg in enumerate(segments):
+            expected_id = f"prod-{i}"
+            assert seg["segment_id"] == expected_id
+            assert seg["package_id"] == expected_id
+            assert seg["product_id"] == expected_id
+
+    def test_campaign_segment_has_budget_and_pricing_info(self):
+        """Segment carries budget from package and pricing_info from package_pricing_info."""
+        adapter = _make_adapter()
+        request = self._make_request()
+        packages = self._make_packages(count=1, with_budget=True)
+
+        pricing_info = {"pkg-0": {"rate": 3.50, "currency": "EUR"}}
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request,
+                packages,
+                datetime(2026, 5, 1, tzinfo=UTC),
+                datetime(2026, 6, 1, tzinfo=UTC),
+                package_pricing_info=pricing_info,
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        seg = sale_data["segments"][0]
+        assert seg["budget"] == 500.0
+        assert seg["pricing_info"] == {"rate": 3.50, "currency": "EUR"}
+
+    def test_campaign_segment_has_ad_format_types(self):
+        """ad_format_types extracted from package format_ids."""
+        adapter = _make_adapter()
+        request = self._make_request()
+        packages = self._make_packages(count=1, with_formats=True)
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        seg = sale_data["segments"][0]
+        assert seg["ad_format_types"] == ["display_300x250_0"]
+
+    def test_campaign_segment_publishers_empty_by_default(self):
+        """publishers == [] by default in campaign segments."""
+        adapter = _make_adapter()
+        request = self._make_request()
+        packages = self._make_packages()
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        seg = sale_data["segments"][0]
+        assert seg["publishers"] == []
+
+    def test_deal_fallback_when_dsps_in_ext(self):
+        """DSPs provided in ext -> deal payload (no campaign_meta, has deal_type)."""
+        adapter = _make_adapter()
+        request = self._make_request(ext={"dsps": [{"seat_id": "s1", "dsp_name": "DSP One"}]})
+        packages = self._make_packages()
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        assert "campaign_meta" not in sale_data
+        assert sale_data["deal_type"] == "curated"
+        assert sale_data["dsps"] == [{"seat_id": "s1", "dsp_name": "DSP One"}]
+
+    def test_deal_fallback_when_sale_type_deal_in_ext(self):
+        """ext.sale_type == 'deal' -> deal payload."""
+        adapter = _make_adapter()
+        request = self._make_request(ext={"sale_type": "deal"})
+        packages = self._make_packages()
+
+        with (
+            patch.object(adapter._sales, "create_sale", return_value={"sale_id": "sale-1"}) as mock_create,
+            patch.object(  # noqa: E501
+                adapter, "_activate_deal", return_value="mock-deal-1"
+            ),
+        ):
+            adapter.create_media_buy(
+                request, packages, datetime(2026, 5, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+            )
+
+        sale_data = mock_create.call_args[0][0]
+        assert "campaign_meta" not in sale_data
+        assert sale_data["deal_type"] == "curated"
+        assert "sale_type" not in sale_data

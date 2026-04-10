@@ -194,10 +194,118 @@ class CurationAdapter(ToolProvider):
         package_pricing_info: dict[str, dict] | None = None,
     ) -> CreateMediaBuyResponse:
         """Create a sale + activation in curation services."""
+        ext_dict = _ext_as_dict(request)
+        use_deal = ext_dict.get("sale_type") == "deal" or bool(_extract_dsps_from_ext(request))
+
+        if use_deal:
+            sale_data = self._build_deal_sale_data(request, packages, start_time, end_time, package_pricing_info)
+        else:
+            sale_data = self._build_campaign_sale_data(request, packages, start_time, end_time, package_pricing_info)
+
+        sale_resp = self._sales.create_sale(sale_data)
+        sale_id = sale_resp.get("sale_id")
+        if not sale_id:
+            raise AdCPAdapterError("Sales service did not return a sale_id")
+        logger.info("Created sale %s (%s) in Sales service", sale_id, sale_data.get("sale_type", "deal"))
+
+        # _activate_deal will be replaced in Task 4. For now, keep calling it
+        # but pass extracted values to allow the method to branch on sale_type.
+        ssp_deal_id = self._activate_deal(
+            sale_id,
+            _extract_pricing(package_pricing_info),
+            _extract_dsps_from_ext(request) or [{"seat_id": "default", "dsp_name": "Default DSP"}],
+            start_time,
+            end_time,
+        )
+
+        pkg_responses = [
+            ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=ssp_deal_id is None)
+            for p in packages
+        ]
+        creative_deadline = datetime.now(UTC) + timedelta(days=2)
+
+        return CreateMediaBuySuccess(
+            buyer_ref=request.buyer_ref or "unknown",
+            media_buy_id=sale_id,
+            creative_deadline=creative_deadline,
+            packages=pkg_responses,
+        )
+
+    def _build_campaign_sale_data(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> dict[str, Any]:
+        """Build a campaign-type sale payload for the Sales service."""
+        brand = getattr(request, "brand", None)
+        brand_domain = ""
+        if brand:
+            brand_domain = getattr(brand, "domain", "") or ""
+
+        segments: list[dict[str, Any]] = []
+        for pkg in packages:
+            pricing_info_dict = (package_pricing_info or {}).get(pkg.package_id, {})
+            rate = pricing_info_dict.get("rate") or pricing_info_dict.get("bid_price")
+            currency = pricing_info_dict.get("currency", "USD")
+
+            ad_format_types: list[str] = []
+            for fmt in getattr(pkg, "format_ids", None) or []:
+                fmt_id = fmt.get("id") if isinstance(fmt, dict) else getattr(fmt, "id", None)
+                if fmt_id:
+                    ad_format_types.append(str(fmt_id))
+
+            segments.append(
+                {
+                    "segment_id": pkg.product_id,
+                    "package_id": pkg.product_id,
+                    "product_id": pkg.product_id,
+                    "domains": [],
+                    "ad_format_types": ad_format_types,
+                    "budget": float(pkg.budget) if pkg.budget else None,
+                    "pricing_info": {"rate": float(rate), "currency": currency} if rate else None,
+                    "creative_assignments": [],
+                    "publishers": [],
+                }
+            )
+
+        sale_data: dict[str, Any] = {
+            "sale_type": "campaign",
+            "buyer_ref": request.buyer_ref or "unknown",
+            "buyer_campaign_ref": request.buyer_ref or "",
+            "campaign_meta": {
+                "order_name": f"{brand_domain}-{request.buyer_ref or 'unknown'}",
+                "media_buy_id": "",
+            },
+            "segments": segments,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+        }
+        if brand_domain:
+            sale_data["brand"] = {"domain": brand_domain}
+        budget = getattr(request, "budget", None)
+        if budget is not None:
+            sale_data["budget"] = float(budget)
+        else:
+            total = sum(float(pkg.budget) for pkg in packages if pkg.budget)
+            if total > 0:
+                sale_data["budget"] = total
+        return sale_data
+
+    def _build_deal_sale_data(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> dict[str, Any]:
+        """Build a deal-type sale payload for the Sales service."""
         segment_refs = [{"segment_id": pkg.product_id} for pkg in packages]
         pricing_info = _extract_pricing(package_pricing_info)
-        dsps = _extract_dsps(request)
-
+        dsps = _extract_dsps_from_ext(request) or [{"seat_id": "default", "dsp_name": "Default DSP"}]
         sale_data: dict[str, Any] = {
             "buyer_ref": request.buyer_ref or "unknown",
             "segments": segment_refs,
@@ -215,31 +323,10 @@ class CurationAdapter(ToolProvider):
         }
         if request.buyer_ref:
             sale_data["buyer_campaign_ref"] = request.buyer_ref
-
         budget = getattr(request, "budget", None)
         if budget is not None:
             sale_data["budget"] = float(budget)
-
-        sale_resp = self._sales.create_sale(sale_data)
-        sale_id = sale_resp.get("sale_id")
-        if not sale_id:
-            raise AdCPAdapterError("Sales service did not return a sale_id")
-        logger.info("Created sale %s in Sales service", sale_id)
-
-        ssp_deal_id = self._activate_deal(sale_id, pricing_info, dsps, start_time, end_time)
-
-        pkg_responses = [
-            ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=ssp_deal_id is None)
-            for p in packages
-        ]
-        creative_deadline = datetime.now(UTC) + timedelta(days=2)
-
-        return CreateMediaBuySuccess(
-            buyer_ref=request.buyer_ref or "unknown",
-            media_buy_id=sale_id,
-            creative_deadline=creative_deadline,
-            packages=pkg_responses,
-        )
+        return sale_data
 
     def _activate_deal(
         self,
@@ -519,12 +606,32 @@ def _extract_pricing(package_pricing_info: dict[str, dict] | None) -> dict[str, 
     }
 
 
-def _extract_dsps(request: CreateMediaBuyRequest) -> list[dict[str, Any]]:
-    """Extract DSP configuration from the request, with sensible defaults."""
-    ext = getattr(request, "ext", None) or {}
-    dsps_from_ext = ext.get("dsps") if isinstance(ext, dict) else None
+def _ext_as_dict(request: CreateMediaBuyRequest) -> dict[str, Any]:
+    """Normalize request.ext to a plain dict.
 
+    ``ext`` may be a dict (from raw dicts in tests) or an adcp
+    ``ExtensionObject`` (Pydantic model with extra fields in
+    ``model_extra``).  This helper returns a plain dict in both cases.
+    """
+    ext = getattr(request, "ext", None)
+    if ext is None:
+        return {}
+    if isinstance(ext, dict):
+        return ext
+    # ExtensionObject — extra fields are stored in model_extra
+    extras = getattr(ext, "model_extra", None) or {}
+    # Also include explicitly declared fields
+    try:
+        declared = ext.model_dump()
+    except Exception:
+        declared = {}
+    return {**declared, **extras}
+
+
+def _extract_dsps_from_ext(request: CreateMediaBuyRequest) -> list[dict[str, Any]] | None:
+    """Extract DSP configuration from request.ext, or None if absent."""
+    ext_dict = _ext_as_dict(request)
+    dsps_from_ext = ext_dict.get("dsps")
     if dsps_from_ext and isinstance(dsps_from_ext, list):
         return dsps_from_ext
-
-    return [{"seat_id": "default", "dsp_name": "Default DSP"}]
+    return None
