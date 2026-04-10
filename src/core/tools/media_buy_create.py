@@ -199,20 +199,30 @@ def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime
 def _build_package_pricing_info(req: CreateMediaBuyRequest) -> dict[str, dict[str, Any]]:
     """Build package_pricing_info dict from request packages.
 
-    Extracts bid_price and pricing_option_id from each package to pass
-    to the adapter's create_media_buy.
+    Extracts bid_price, pricing_option_id, and currency from each package
+    to pass to the adapter's create_media_buy.
     """
     result: dict[str, dict[str, Any]] = {}
     for i, pkg in enumerate(req.packages or []):
         product_id = getattr(pkg, "product_id", "unknown")
         pkg_id = getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}"
         bid_price = getattr(pkg, "bid_price", None)
+        pricing_option_id = getattr(pkg, "pricing_option_id", None)
+
+        # Try to extract currency from pricing_option_id format: {model}_{currency}_{type}
+        currency = getattr(pkg, "currency", None) or "USD"
+        if not getattr(pkg, "currency", None) and pricing_option_id:
+            parts = pricing_option_id.split("_")
+            if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isalpha():
+                currency = parts[1].upper()
+
         result[pkg_id] = {
             "pricing_model": getattr(pkg, "pricing_model", None) or "cpm",
-            "currency": getattr(pkg, "currency", None) or "USD",
+            "currency": currency,
             "rate": float(bid_price) if bid_price else None,
             "bid_price": float(bid_price) if bid_price else None,
-            "is_fixed": False,
+            "is_fixed": pricing_option_id.endswith("_fixed") if pricing_option_id else False,
+            "pricing_option_id": pricing_option_id,
         }
     return result
 

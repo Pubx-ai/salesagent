@@ -255,6 +255,17 @@ class CurationAdapter(ToolProvider):
             # Get pricing_option_id from the original request package
             orig_pkg = req_pkg_by_product.get(pkg.product_id or "")
             pricing_option_id = getattr(orig_pkg, "pricing_option_id", None) if orig_pkg else None
+            if not pricing_option_id:
+                pricing_option_id = pricing_info_dict.get("pricing_option_id")
+
+            # Fallback: when buyer sends pricing_option_id without bid_price,
+            # use the adapter's configured floor CPM as the rate
+            if rate is None and pricing_option_id:
+                rate = self._pricing_floor_cpm
+                logger.info(
+                    "No bid_price for %s, using floor CPM %.2f from pricing_option %s",
+                    pkg.product_id, rate, pricing_option_id,
+                )
 
             ad_format_types: list[str] = []
             for fmt in getattr(pkg, "format_ids", None) or []:
