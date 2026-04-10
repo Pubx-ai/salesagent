@@ -258,13 +258,12 @@ class CurationAdapter(ToolProvider):
             if not pricing_option_id:
                 pricing_option_id = pricing_info_dict.get("pricing_option_id")
 
-            # Fallback: when buyer sends pricing_option_id without bid_price,
-            # use the adapter's configured floor CPM as the rate
-            if rate is None and pricing_option_id:
+            # Fallback: when rate is missing (no bid_price), use configured floor CPM
+            if rate is None:
                 rate = self._pricing_floor_cpm
                 logger.info(
-                    "No bid_price for %s, using floor CPM %.2f from pricing_option %s",
-                    pkg.product_id, rate, pricing_option_id,
+                    "No bid_price for %s, using floor CPM %.2f",
+                    pkg.product_id, rate,
                 )
 
             ad_format_types: list[str] = []
@@ -313,8 +312,10 @@ class CurationAdapter(ToolProvider):
             )
 
         # Build campaign_meta with optional po_number and account_id
+        buyer_ref = request.buyer_ref or "unknown"
+        order_name = f"{brand_domain}-{buyer_ref}" if brand_domain else buyer_ref
         campaign_meta: dict[str, Any] = {
-            "order_name": f"{brand_domain}-{request.buyer_ref or 'unknown'}",
+            "order_name": order_name,
             "media_buy_id": "",
         }
         po_number = getattr(request, "po_number", None)
