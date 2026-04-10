@@ -549,31 +549,72 @@ class CurationAdapter(ToolProvider):
     def _sale_to_media_buy(self, sale: dict) -> GetMediaBuysMediaBuy:
         """Convert a curation SaleResponse dict to an AdCP GetMediaBuysMediaBuy.
 
-        Mapping rules (see spec §5.5):
-        - One sale segment → one GetMediaBuysPackage
-        - package_id = product_id = segment.segment_id
-        - bid_price: segment.pricing.fixed_price → segment.pricing.floor_price
-          → sale.pricing.fixed_price → sale.pricing.floor_price → None
-        - budget: always None at the package level (no per-package budget
-          concept in curation sales)
-        - status: SALE_STATUS_TO_ADCP mapping, fallback pending_activation
-        - start_time/end_time: passed as raw ISO strings (schema uses `str | None`)
-        - created_at/updated_at: parsed to datetime (schema uses `datetime | None`)
+        Detects sale_type to handle campaign vs deal segment shapes:
+        - Campaign: segments have package_id, product_id, budget, pricing_info
+        - Deal: segments have only segment_id; pricing at sale root level
         """
         sale_id = sale["sale_id"]
-        sale_pricing = sale.get("pricing") or {}
-        currency = sale_pricing.get("currency", "USD")
+        is_campaign = sale.get("sale_type") == "campaign"
 
+        if is_campaign:
+            packages = self._convert_campaign_segments(sale)
+            first_seg = (sale.get("segments") or [{}])[0] if sale.get("segments") else {}
+            currency = (first_seg.get("pricing_info") or {}).get("currency", "USD")
+        else:
+            packages = self._convert_deal_segments(sale)
+            sale_pricing = sale.get("pricing") or {}
+            currency = sale_pricing.get("currency", "USD")
+
+        adcp_status_str = SALE_STATUS_TO_ADCP.get(sale.get("status", ""), "pending_activation")
+
+        return GetMediaBuysMediaBuy(
+            media_buy_id=sale_id,
+            buyer_ref=sale.get("buyer_ref"),
+            buyer_campaign_ref=sale.get("buyer_campaign_ref"),
+            status=MediaBuyStatus(adcp_status_str),
+            currency=currency,
+            total_budget=float(sale.get("budget") or 0.0),
+            packages=packages,
+            created_at=_parse_iso(sale.get("created_at")),
+            updated_at=_parse_iso(sale.get("updated_at")),
+        )
+
+    def _convert_campaign_segments(self, sale: dict) -> list[GetMediaBuysPackage]:
+        """Convert campaign segments (rich data) to GetMediaBuysPackage list."""
+        packages: list[GetMediaBuysPackage] = []
+        for seg in sale.get("segments") or []:
+            segment_id = seg.get("segment_id") or seg.get("package_id")
+            if not segment_id:
+                continue
+            pricing_info = seg.get("pricing_info") or {}
+            bid_price = pricing_info.get("rate")
+            packages.append(
+                GetMediaBuysPackage(
+                    package_id=seg.get("package_id") or segment_id,
+                    buyer_ref=sale.get("buyer_ref"),
+                    budget=float(seg["budget"]) if seg.get("budget") is not None else None,
+                    bid_price=float(bid_price) if bid_price is not None else None,
+                    product_id=seg.get("product_id") or segment_id,
+                    start_time=sale.get("start_time"),
+                    end_time=sale.get("end_time"),
+                    paused=None,
+                    creative_approvals=None,
+                    snapshot=None,
+                    snapshot_unavailable_reason=None,
+                )
+            )
+        return packages
+
+    def _convert_deal_segments(self, sale: dict) -> list[GetMediaBuysPackage]:
+        """Convert deal segments (simple {segment_id} + root pricing) to GetMediaBuysPackage list."""
+        sale_pricing = sale.get("pricing") or {}
         packages: list[GetMediaBuysPackage] = []
         for seg in sale.get("segments") or []:
             segment_id = seg.get("segment_id")
             if not segment_id:
                 continue
-
-            # Per-segment pricing override (forward-compat), else sale-level
             seg_pricing = seg.get("pricing") or sale_pricing
             bid_price = seg_pricing.get("fixed_price") or seg_pricing.get("floor_price")
-
             packages.append(
                 GetMediaBuysPackage(
                     package_id=segment_id,
@@ -589,20 +630,7 @@ class CurationAdapter(ToolProvider):
                     snapshot_unavailable_reason=None,
                 )
             )
-
-        adcp_status_str = SALE_STATUS_TO_ADCP.get(sale.get("status", ""), "pending_activation")
-
-        return GetMediaBuysMediaBuy(
-            media_buy_id=sale_id,
-            buyer_ref=sale.get("buyer_ref"),
-            buyer_campaign_ref=sale.get("buyer_campaign_ref"),
-            status=MediaBuyStatus(adcp_status_str),
-            currency=currency,
-            total_budget=float(sale.get("budget") or 0.0),
-            packages=packages,
-            created_at=_parse_iso(sale.get("created_at")),
-            updated_at=_parse_iso(sale.get("updated_at")),
-        )
+        return packages
 
 
 def _extract_pricing(package_pricing_info: dict[str, dict] | None) -> dict[str, Any]:

@@ -1074,6 +1074,133 @@ class TestSaleToMediaBuy:
         assert mb.updated_at.day == 30
 
 
+# ── Campaign _sale_to_media_buy Converter Tests ─────────────────────────────
+
+
+SAMPLE_CAMPAIGN_SALE_DICT = {
+    "sale_id": "sale-camp-001",
+    "sale_type": "campaign",
+    "buyer_ref": "buyer-1",
+    "buyer_campaign_ref": "buyer-1",
+    "campaign_meta": {"order_name": "acme.com-buyer-1", "media_buy_id": ""},
+    "segments": [
+        {
+            "segment_id": "seg-aaa",
+            "package_id": "seg-aaa",
+            "product_id": "seg-aaa",
+            "domains": ["example.com"],
+            "ad_format_types": ["display_banner_728x90"],
+            "budget": 5000.0,
+            "pricing_info": {"rate": 2.50, "currency": "USD"},
+            "creative_assignments": [],
+            "publishers": [],
+        },
+        {
+            "segment_id": "seg-bbb",
+            "package_id": "seg-bbb",
+            "product_id": "seg-bbb",
+            "domains": [],
+            "ad_format_types": ["video_640x480"],
+            "budget": 3000.0,
+            "pricing_info": {"rate": 4.00, "currency": "USD"},
+            "creative_assignments": [],
+            "publishers": [{"gam_network_code": "117107141"}],
+        },
+    ],
+    "activations": [],
+    "brand": {"domain": "acme.com"},
+    "budget": 8000.0,
+    "start_time": "2026-05-01T00:00:00Z",
+    "end_time": "2026-05-31T23:59:59Z",
+    "status": "active",
+    "created_at": "2026-04-10T10:00:00Z",
+    "updated_at": "2026-04-10T10:00:00Z",
+}
+
+
+class TestSaleToMediaBuyCampaign:
+    def test_campaign_produces_correct_package_count(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        assert len(mb.packages) == 2
+
+    def test_campaign_package_ids_from_segment(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        pkg_ids = [pkg.package_id for pkg in mb.packages]
+        assert pkg_ids == ["seg-aaa", "seg-bbb"]
+
+    def test_campaign_product_ids_from_segment(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        product_ids = [pkg.product_id for pkg in mb.packages]
+        assert product_ids == ["seg-aaa", "seg-bbb"]
+
+    def test_campaign_budget_from_segment(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        budgets = [pkg.budget for pkg in mb.packages]
+        assert budgets == [5000.0, 3000.0]
+
+    def test_campaign_bid_price_from_pricing_info_rate(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        bid_prices = [pkg.bid_price for pkg in mb.packages]
+        assert bid_prices == [2.50, 4.00]
+
+    def test_campaign_total_budget_from_sale(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        assert mb.total_budget == 8000.0
+
+    def test_campaign_currency_defaults_to_usd(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_CAMPAIGN_SALE_DICT)
+        assert mb.currency == "USD"
+
+    def test_campaign_missing_pricing_info_yields_none_bid(self):
+        adapter = _make_adapter()
+        sale = {
+            **SAMPLE_CAMPAIGN_SALE_DICT,
+            "segments": [
+                {
+                    "segment_id": "seg-no-pricing",
+                    "package_id": "seg-no-pricing",
+                    "product_id": "seg-no-pricing",
+                    "budget": 1000.0,
+                    # no pricing_info key
+                },
+            ],
+        }
+        mb = adapter._sale_to_media_buy(sale)
+        assert len(mb.packages) == 1
+        assert mb.packages[0].bid_price is None
+
+    def test_deal_sale_still_works_unchanged(self):
+        adapter = _make_adapter()
+        mb = adapter._sale_to_media_buy(SAMPLE_SALE_DICT)
+        assert mb.media_buy_id == "sale-abc-123"
+        assert len(mb.packages) == 2
+        pkg_ids = [pkg.package_id for pkg in mb.packages]
+        assert pkg_ids == ["seg-red", "seg-blue"]
+        for pkg in mb.packages:
+            assert pkg.budget is None
+            assert pkg.bid_price == 2.50
+
+    def test_campaign_with_no_sale_type_treated_as_deal(self):
+        adapter = _make_adapter()
+        sale = {
+            **SAMPLE_CAMPAIGN_SALE_DICT,
+            "sale_type": None,  # explicitly no sale_type
+            # Has campaign-style segments but should be treated as deal
+            "pricing": {"currency": "USD", "floor_price": 1.00},
+        }
+        mb = adapter._sale_to_media_buy(sale)
+        # Deal parsing uses segment_id only, budget is always None
+        for pkg in mb.packages:
+            assert pkg.budget is None
+
+
 # ── CurationAdapter.list_media_buys Tests ─────────────────────────────────
 
 
