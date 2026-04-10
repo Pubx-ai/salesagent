@@ -16,16 +16,16 @@ logger = logging.getLogger(__name__)
 class ActivationClient(CurationHttpClient):
     """Synchronous HTTP client for the Curation Activation service."""
 
-    def create_activation(self, activation_data: dict[str, Any]) -> dict[str, Any]:
-        """Create a new activation for a sale.
+    def create_activation(self, sale_id: str) -> dict[str, Any]:
+        """Trigger activation for a sale.
 
-        The activation service will create PMP deals on the SSP
-        and return activation results (possibly partial success via 207).
+        The activation service fetches the sale internally and routes
+        based on sale_type (campaign -> GAM, deal -> Magnite).
 
         Returns:
             ActivationCreateResult dict with 'activations' and optional 'errors'.
         """
-        return self._request("POST", "/activations", json=activation_data, accept_statuses=(201, 207))
+        return self._request("POST", "/activations", json={"sale_id": sale_id}, accept_statuses=(201, 207))
 
     def get_activations_for_sale(self, sale_id: str) -> dict[str, Any]:
         """List activations filtered by sale_id."""

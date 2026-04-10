@@ -729,6 +729,39 @@ class TestSalesClientListSales:
         assert result == expected
 
 
+# ── ActivationClient Simplified Payload Tests ────────────────────────────
+
+
+class TestActivationClientSimplified:
+    """ActivationClient.create_activation sends only {sale_id: ...}."""
+
+    def test_create_activation_sends_sale_id_only(self):
+        from src.adapters.curation.activation_client import ActivationClient
+
+        client = ActivationClient(base_url="http://test")
+        with patch.object(client, "_request") as mock_request:
+            mock_request.return_value = {"activations": [{"deal_id": "d1"}]}
+            client.create_activation("sale-123")
+
+        mock_request.assert_called_once_with(
+            "POST",
+            "/activations",
+            json={"sale_id": "sale-123"},
+            accept_statuses=(201, 207),
+        )
+
+    def test_create_activation_returns_full_response(self):
+        from src.adapters.curation.activation_client import ActivationClient
+
+        client = ActivationClient(base_url="http://test")
+        expected = {"activations": [{"deal_id": "d1"}], "errors": []}
+        with patch.object(client, "_request") as mock_request:
+            mock_request.return_value = expected
+            result = client.create_activation("sale-123")
+
+        assert result == expected
+
+
 # ── ADCP_STATUS_TO_SALE_STATUSES Tests ────────────────────────────────────
 
 
