@@ -249,6 +249,14 @@ class CurationAdapter(ToolProvider):
                 if fmt_id:
                     ad_format_types.append(str(fmt_id))
 
+            # Extract frequency_cap from targeting_overlay if present
+            frequency_cap = None
+            targeting = getattr(pkg, "targeting_overlay", None)
+            if targeting:
+                fc = getattr(targeting, "frequency_cap", None) if not isinstance(targeting, dict) else targeting.get("frequency_cap")
+                if fc:
+                    frequency_cap = fc if isinstance(fc, dict) else fc.model_dump(mode="json") if hasattr(fc, "model_dump") else None
+
             segments.append(
                 {
                     "segment_id": pkg.product_id,
@@ -260,6 +268,7 @@ class CurationAdapter(ToolProvider):
                     "pricing_info": {"rate": float(rate), "currency": currency} if rate else None,
                     "creative_assignments": [],
                     "publishers": [],
+                    "frequency_cap": frequency_cap,
                 }
             )
 
