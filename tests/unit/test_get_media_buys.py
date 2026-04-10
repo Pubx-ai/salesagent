@@ -799,9 +799,7 @@ class TestGetMediaBuysCurationEarlyReturn:
         # The fix: tenant must be passed explicitly so get_adapter does NOT
         # fall through to get_current_tenant() in production.
         call_kwargs = mock_get_adapter.call_args.kwargs
-        assert "tenant" in call_kwargs, (
-            f"get_adapter must be called with tenant= kwarg; got kwargs={list(call_kwargs)}"
-        )
+        assert "tenant" in call_kwargs, f"get_adapter must be called with tenant= kwarg; got kwargs={list(call_kwargs)}"
         assert call_kwargs["tenant"] == identity.tenant
 
     def test_curation_tenant_truncation_appends_errors_entry(self):

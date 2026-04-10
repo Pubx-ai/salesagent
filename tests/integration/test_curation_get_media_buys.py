@@ -19,33 +19,13 @@ import pytest
 _REAL_HTTPX_CLIENT = httpx.Client
 
 
+from tests.helpers.curation_fixtures import make_deal_sale
+
 SALES_BASE = "http://sales.test"
 
 
 def _sale_payload(sale_id: str, status: str = "active") -> dict:
-    return {
-        "sale_id": sale_id,
-        "buyer_ref": "buyer-1",
-        "buyer_campaign_ref": None,
-        "segments": [{"segment_id": f"seg-{sale_id}"}],
-        "activations": [],
-        "pricing": {
-            "pricing_model": "cpm",
-            "currency": "USD",
-            "floor_price": 2.5,
-        },
-        "deal_type": "curated",
-        "platform_id": "magnite",
-        "dsps": [],
-        "ad_format_types": None,
-        "start_time": "2026-04-01T00:00:00Z",
-        "end_time": "2026-04-30T23:59:59Z",
-        "brand": None,
-        "budget": 1000.0,
-        "status": status,
-        "created_at": "2026-03-29T10:00:00Z",
-        "updated_at": "2026-03-30T15:00:00Z",
-    }
+    return make_deal_sale(sale_id, status=status, floor_price=2.5)
 
 
 def _make_mock_client_factory(handler: Callable[[httpx.Request], httpx.Response]):

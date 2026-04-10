@@ -882,33 +882,14 @@ class TestParseIso:
 # ── _sale_to_media_buy Converter Tests ────────────────────────────────────
 
 
-SAMPLE_SALE_DICT = {
-    "sale_id": "sale-abc-123",
-    "buyer_ref": "buyer-1",
-    "buyer_campaign_ref": "camp-9",
-    "segments": [
-        {"segment_id": "seg-red"},
-        {"segment_id": "seg-blue"},
-    ],
-    "activations": [],
-    "pricing": {
-        "pricing_model": "cpm",
-        "currency": "USD",
-        "floor_price": 2.50,
-        "fixed_price": None,
-    },
-    "deal_type": "curated",
-    "platform_id": "magnite",
-    "dsps": [],
-    "ad_format_types": None,
-    "start_time": "2026-04-01T00:00:00Z",
-    "end_time": "2026-04-30T23:59:59Z",
-    "brand": None,
-    "budget": 1000.0,
-    "status": "active",
-    "created_at": "2026-03-29T10:00:00Z",
-    "updated_at": "2026-03-30T15:00:00Z",
-}
+from tests.helpers.curation_fixtures import make_deal_sale
+
+SAMPLE_SALE_DICT = make_deal_sale(
+    "sale-abc-123",
+    buyer_ref="buyer-1",
+    segments=[{"segment_id": "seg-red"}, {"segment_id": "seg-blue"}],
+    buyer_campaign_ref="camp-9",
+)
 
 
 def _make_adapter():
@@ -1224,25 +1205,7 @@ def _make_adapter_with_cap(cap: int = 500):
 
 def _sale_stub(sale_id: str, status: str = "active", buyer_ref: str = "buyer-1") -> dict:
     """Build a minimal valid sale dict for the converter."""
-    return {
-        "sale_id": sale_id,
-        "buyer_ref": buyer_ref,
-        "buyer_campaign_ref": None,
-        "segments": [{"segment_id": f"seg-{sale_id}"}],
-        "activations": [],
-        "pricing": {"pricing_model": "cpm", "currency": "USD", "floor_price": 1.0},
-        "deal_type": "curated",
-        "platform_id": "magnite",
-        "dsps": [],
-        "ad_format_types": None,
-        "start_time": "2026-04-01T00:00:00Z",
-        "end_time": "2026-04-30T23:59:59Z",
-        "brand": None,
-        "budget": 100.0,
-        "status": status,
-        "created_at": "2026-03-29T10:00:00Z",
-        "updated_at": "2026-03-30T15:00:00Z",
-    }
+    return make_deal_sale(sale_id, status=status, buyer_ref=buyer_ref, budget=100.0)
 
 
 class TestListMediaBuys:
