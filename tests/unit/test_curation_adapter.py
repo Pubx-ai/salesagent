@@ -717,6 +717,20 @@ class TestSalesClientListSales:
             params={"limit": 20},
         )
 
+    def test_list_sales_passes_sale_type(self):
+        from src.adapters.curation.sales_client import SalesClient
+
+        client = SalesClient(base_url="http://test")
+        with patch.object(client, "_request") as mock_request:
+            mock_request.return_value = {"items": [], "next_cursor": None}
+            client.list_sales(sale_type="campaign", limit=20)
+
+        mock_request.assert_called_once_with(
+            "GET",
+            "/api/v1/sales",
+            params={"limit": 20, "sale_type": "campaign"},
+        )
+
     def test_list_sales_returns_raw_dict(self):
         from src.adapters.curation.sales_client import SalesClient
 

@@ -47,6 +47,7 @@ class SalesClient(CurationHttpClient):
         statuses: list[str] | None = None,
         sale_ids: list[str] | None = None,
         buyer_refs: list[str] | None = None,
+        sale_type: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> dict[str, Any]:
@@ -57,6 +58,7 @@ class SalesClient(CurationHttpClient):
             statuses: Multi-value status filter (wins over ``status`` if both set).
             sale_ids: Filter to specific sale IDs (primary-key lookup).
             buyer_refs: Filter to specific buyer references.
+            sale_type: Filter by sale type (e.g. "deal" or "campaign").
             limit: Max items per page (sales service max is 100).
             cursor: Opaque pagination cursor from a prior response.
 
@@ -75,4 +77,6 @@ class SalesClient(CurationHttpClient):
             params["sale_ids"] = sale_ids
         if buyer_refs:
             params["buyer_refs"] = buyer_refs
+        if sale_type:
+            params["sale_type"] = sale_type
         return self._request("GET", "/api/v1/sales", params=params)
