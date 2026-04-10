@@ -194,6 +194,30 @@ class CurationAdapter(ToolProvider):
         package_pricing_info: dict[str, dict] | None = None,
     ) -> CreateMediaBuyResponse:
         """Create a sale + activation in curation services."""
+        logger.info(
+            "create_media_buy input: buyer_ref=%s, brand=%s, packages=%d, start=%s, end=%s, "
+            "pricing_info_keys=%s, ext_keys=%s",
+            request.buyer_ref,
+            getattr(getattr(request, "brand", None), "domain", None),
+            len(packages),
+            start_time,
+            end_time,
+            list((package_pricing_info or {}).keys()),
+            list(_ext_as_dict(request).keys()),
+        )
+        for i, pkg in enumerate(packages):
+            logger.info(
+                "  package[%d]: product_id=%s, budget=%s, cpm=%s, format_ids=%s, "
+                "creative_ids=%s, targeting=%s",
+                i,
+                pkg.product_id,
+                pkg.budget,
+                pkg.cpm,
+                [getattr(f, "id", f) for f in (pkg.format_ids or [])],
+                getattr(pkg, "creative_ids", None),
+                "yes" if getattr(pkg, "targeting_overlay", None) else "no",
+            )
+
         ext_dict = _ext_as_dict(request)
         use_deal = ext_dict.get("sale_type") == "deal" or bool(_extract_dsps_from_ext(request))
 
