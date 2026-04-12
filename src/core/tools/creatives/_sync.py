@@ -93,6 +93,16 @@ def _sync_creatives_impl(
     if not tenant:
         raise AdCPAuthenticationError("No tenant context available")
 
+    # TODO(pubx): Temporary skip for curation tenants. sync_creatives assumes
+    # packages exist in Postgres, but curation tenants manage persistence
+    # externally (curation_sales service). This needs a proper implementation
+    # that updates creative_assignments on the sale record via the adapter.
+    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
+
+    if adapter_manages_own_persistence(tenant):
+        logger.info("[sync_creatives] Skipping for curation tenant %s (manages_own_persistence)", tenant.get("tenant_id"))
+        return SyncCreativesResponse(creatives=[])
+
     # Track actions per creative for AdCP-compliant response
 
     results: list[SyncCreativeResult] = []
