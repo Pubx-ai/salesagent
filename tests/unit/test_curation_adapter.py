@@ -1674,3 +1674,101 @@ class TestActivateSale:
         assert activation["gam_network_code"] == "mock-network"
         assert "gam_order_id" in activation
         assert activation["status"] == "active"
+
+
+class TestBuildCreativeAssignments:
+    """Tests for _build_creative_assignments snippet→tag mapping."""
+
+    def test_snippet_mapped_to_tag(self):
+        """Creative with snippet and no tag → result has tag from snippet."""
+        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.core.schemas import MediaPackage
+
+        creative = MagicMock()
+        creative.creative_id = "c1"
+        creative.format_id = None
+        creative.name = None
+        creative.tag = None
+        creative.snippet = "<img src='ad.png' />"
+        creative.snippet_type = None
+        creative.assets = None
+        creative.status = None
+
+        pkg = MagicMock(spec=MediaPackage)
+        pkg.creative_ids = None
+
+        orig_pkg = MagicMock()
+        orig_pkg.creatives = [creative]
+
+        result = _build_creative_assignments(pkg, orig_pkg)
+
+        assert len(result) == 1
+        assert result[0]["tag"] == "<img src='ad.png' />"
+
+    def test_tag_field_takes_precedence_over_snippet(self):
+        """Creative with both tag and snippet → tag wins."""
+        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.core.schemas import MediaPackage
+
+        creative = MagicMock()
+        creative.creative_id = "c2"
+        creative.format_id = None
+        creative.name = None
+        creative.tag = "<p>tag wins</p>"
+        creative.snippet = "<p>snippet</p>"
+        creative.snippet_type = None
+        creative.assets = None
+        creative.status = None
+
+        pkg = MagicMock(spec=MediaPackage)
+        pkg.creative_ids = None
+
+        orig_pkg = MagicMock()
+        orig_pkg.creatives = [creative]
+
+        result = _build_creative_assignments(pkg, orig_pkg)
+
+        assert len(result) == 1
+        assert result[0]["tag"] == "<p>tag wins</p>"
+
+    def test_no_creatives_returns_empty(self):
+        """No creatives on either pkg or orig_pkg → empty list."""
+        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.core.schemas import MediaPackage
+
+        pkg = MagicMock(spec=MediaPackage)
+        pkg.creative_ids = None
+
+        orig_pkg = MagicMock()
+        orig_pkg.creatives = None
+
+        result = _build_creative_assignments(pkg, orig_pkg)
+
+        assert result == []
+
+    def test_snippet_type_passed_through(self):
+        """Creative with snippet_type → result includes snippet_type."""
+        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.core.schemas import MediaPackage
+
+        creative = MagicMock()
+        creative.creative_id = "c3"
+        creative.format_id = None
+        creative.name = None
+        creative.tag = None
+        creative.snippet = "<div>ad</div>"
+        creative.snippet_type = "html"
+        creative.assets = None
+        creative.status = None
+
+        pkg = MagicMock(spec=MediaPackage)
+        pkg.creative_ids = None
+
+        orig_pkg = MagicMock()
+        orig_pkg.creatives = [creative]
+
+        result = _build_creative_assignments(pkg, orig_pkg)
+
+        assert len(result) == 1
+        assert result[0]["tag"] == "<div>ad</div>"
+        assert result[0]["snippet_type"] == "html"

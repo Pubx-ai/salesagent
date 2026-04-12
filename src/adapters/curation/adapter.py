@@ -232,8 +232,7 @@ class CurationAdapter(ToolProvider):
         if package_pricing_info:
             for pkg_id, info in package_pricing_info.items():
                 logger.info(
-                    "  pricing[%s]: rate=%s, bid_price=%s, currency=%s, "
-                    "pricing_option_id=%s, is_fixed=%s",
+                    "  pricing[%s]: rate=%s, bid_price=%s, currency=%s, pricing_option_id=%s, is_fixed=%s",
                     pkg_id,
                     info.get("rate"),
                     info.get("bid_price"),
@@ -314,7 +313,8 @@ class CurationAdapter(ToolProvider):
                 rate = self._pricing_floor_cpm
                 logger.info(
                     "No bid_price for %s, using floor CPM %.2f",
-                    pkg.product_id, rate,
+                    pkg.product_id,
+                    rate,
                 )
 
             ad_format_types: list[str] = []
@@ -473,9 +473,7 @@ class CurationAdapter(ToolProvider):
 
                 if not activations:
                     errors = act_result.get("errors")
-                    logger.warning(
-                        "Activation returned no results for sale %s, errors: %s", sale_id, errors
-                    )
+                    logger.warning("Activation returned no results for sale %s, errors: %s", sale_id, errors)
                     return None
 
                 act_resp = activations[0]
@@ -817,14 +815,20 @@ def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list
                 name = getattr(c, "name", None)
                 if name:
                     entry["name"] = name
-                # tag may be in assets or as a direct field
-                tag = getattr(c, "tag", None)
+                # Map tag or snippet → "tag" (activation service expects "tag",
+                # AdCP spec uses "snippet" for HTML/VAST content)
+                tag = getattr(c, "tag", None) or getattr(c, "snippet", None)
                 if tag:
                     entry["tag"] = tag
+                snippet_type = getattr(c, "snippet_type", None)
+                if snippet_type:
+                    entry["snippet_type"] = snippet_type
                 assets = getattr(c, "assets", None)
                 if assets:
-                    entry["assets"] = assets if isinstance(assets, dict) else (
-                        assets.model_dump(mode="json") if hasattr(assets, "model_dump") else {}
+                    entry["assets"] = (
+                        assets
+                        if isinstance(assets, dict)
+                        else (assets.model_dump(mode="json") if hasattr(assets, "model_dump") else {})
                     )
                 status = getattr(c, "status", None)
                 if status:
