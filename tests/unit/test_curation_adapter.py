@@ -1410,8 +1410,8 @@ class TestCreateMediaBuyCampaignPayload:
         assert sale_data["campaign_meta"]["order_name"] == "acme.com-buy-99"
         assert sale_data["campaign_meta"]["media_buy_id"] == ""
 
-    def test_campaign_segments_have_package_and_product_ids(self):
-        """Each segment has segment_id == package_id == product_id == pkg.product_id."""
+    def test_campaign_segments_have_segment_and_product_ids(self):
+        """Each segment has segment_id == product_id == pkg.product_id, no package_id."""
         adapter = _make_adapter()
         request = self._make_request()
         packages = self._make_packages(count=2)
@@ -1432,8 +1432,8 @@ class TestCreateMediaBuyCampaignPayload:
         for i, seg in enumerate(segments):
             expected_id = f"prod-{i}"
             assert seg["segment_id"] == expected_id
-            assert seg["package_id"] == expected_id
             assert seg["product_id"] == expected_id
+            assert "package_id" not in seg
 
     def test_campaign_segment_has_budget_and_pricing_info(self):
         """Segment carries budget from package and pricing_info from package_pricing_info."""

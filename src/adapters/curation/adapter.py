@@ -350,7 +350,6 @@ class CurationAdapter(ToolProvider):
             segments.append(
                 {
                     "segment_id": pkg.product_id,
-                    "package_id": pkg.product_id,
                     "product_id": pkg.product_id,
                     "domains": [],
                     "ad_format_types": ad_format_types,
