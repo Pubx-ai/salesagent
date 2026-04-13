@@ -294,6 +294,16 @@ class CurationAdapter(ToolProvider):
             if pid:
                 req_pkg_by_product[pid] = req_pkg
 
+        # Fetch catalog metadata per segment for domains enrichment
+        catalog_by_id: dict[str, dict[str, Any]] = {}
+        for pkg in packages:
+            if pkg.product_id and pkg.product_id not in catalog_by_id:
+                try:
+                    seg_data = self._catalog.fetch_segment_by_id(pkg.product_id)
+                    catalog_by_id[pkg.product_id] = seg_data
+                except Exception:
+                    logger.warning("Could not fetch catalog segment %s for domain enrichment", pkg.product_id)
+
         segments: list[dict[str, Any]] = []
         for pkg in packages:
             pricing_info_dict = (package_pricing_info or {}).get(pkg.package_id, {})
@@ -347,11 +357,15 @@ class CurationAdapter(ToolProvider):
                 if is_fixed:
                     pricing_info["is_fixed"] = is_fixed
 
+            # Enrich domains from catalog metadata
+            cat_seg = catalog_by_id.get(pkg.product_id or "")
+            domains = (cat_seg.get("metadata") or {}).get("domains", []) if cat_seg else []
+
             segments.append(
                 {
                     "segment_id": pkg.product_id,
                     "product_id": pkg.product_id,
-                    "domains": [],
+                    "domains": domains,
                     "ad_format_types": ad_format_types,
                     "budget": float(pkg.budget) if pkg.budget else None,
                     "pricing_info": pricing_info,
