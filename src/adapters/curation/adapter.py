@@ -815,21 +815,31 @@ def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list
                 name = getattr(c, "name", None)
                 if name:
                     entry["name"] = name
-                # Map tag or snippet → "tag" (activation service expects "tag",
-                # AdCP spec uses "snippet" for HTML/VAST content)
-                tag = getattr(c, "tag", None) or getattr(c, "snippet", None)
+                # Extract the creative tag (HTML/VAST content).
+                # Priority: root "tag" → root "snippet" → assets.snippet
+                # The activation service reads "tag" from creative_assignments.
+                assets_raw = getattr(c, "assets", None)
+                assets_dict: dict[str, Any] = {}
+                if assets_raw:
+                    assets_dict = (
+                        assets_raw
+                        if isinstance(assets_raw, dict)
+                        else (assets_raw.model_dump(mode="json") if hasattr(assets_raw, "model_dump") else {})
+                    )
+
+                tag = (
+                    getattr(c, "tag", None)
+                    or getattr(c, "snippet", None)
+                    or assets_dict.get("snippet")
+                )
                 if tag:
                     entry["tag"] = tag
-                snippet_type = getattr(c, "snippet_type", None)
+                snippet_type = (
+                    getattr(c, "snippet_type", None)
+                    or assets_dict.get("snippet_type")
+                )
                 if snippet_type:
                     entry["snippet_type"] = snippet_type
-                assets = getattr(c, "assets", None)
-                if assets:
-                    entry["assets"] = (
-                        assets
-                        if isinstance(assets, dict)
-                        else (assets.model_dump(mode="json") if hasattr(assets, "model_dump") else {})
-                    )
                 status = getattr(c, "status", None)
                 if status:
                     entry["status"] = str(status.value) if hasattr(status, "value") else str(status)
