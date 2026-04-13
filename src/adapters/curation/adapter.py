@@ -318,7 +318,11 @@ class CurationAdapter(ToolProvider):
             if not pricing_option_id:
                 pricing_option_id = pricing_info_dict.get("pricing_option_id")
 
-            # Fallback: when rate is missing (no bid_price), use configured floor CPM
+            # TODO(pubx): Fallback uses raw floor CPM ($0.10) when buyer doesn't
+            # send bid_price. Consider using the segment's recommended price
+            # (avg_cpm × pricing_multiplier) instead, which is what the buyer
+            # sees in get_products. This would require fetching catalog estimation
+            # data per segment here. Current behavior is intentional for now.
             if rate is None:
                 rate = self._pricing_floor_cpm
                 logger.info(
