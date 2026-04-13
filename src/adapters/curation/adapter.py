@@ -815,9 +815,11 @@ def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list
                 name = getattr(c, "name", None)
                 if name:
                     entry["name"] = name
-                # Extract the creative tag (HTML/VAST content).
+                # TODO(pubx): Hack for demo — reads snippet from assets dict
+                # because the Pydantic model rejects root-level snippet fields.
+                # Proper implementation should use sync_creatives with a curation
+                # adapter path that updates the sale record directly.
                 # Priority: root "tag" → root "snippet" → assets.snippet
-                # The activation service reads "tag" from creative_assignments.
                 assets_raw = getattr(c, "assets", None)
                 assets_dict: dict[str, Any] = {}
                 if assets_raw:
