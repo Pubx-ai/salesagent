@@ -109,7 +109,7 @@ class TestSegmentToProduct:
 
         po = product.pricing_options[0].root
         assert po.price_guidance is not None
-        assert po.price_guidance.p50 == 0.59
+        assert po.price_guidance.p50 == 2.95  # multiplied: 0.59 * 5.0 = 2.95
         assert po.price_guidance.recommended == 2.95
 
     def test_countries_extracted_from_cel(self):

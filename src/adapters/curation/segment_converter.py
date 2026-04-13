@@ -213,13 +213,17 @@ def _build_price_guidance(
     multiplier: float,
     max_suggested_cpm: float,
 ) -> PriceGuidance | None:
-    """Build PriceGuidance from historical CPM data."""
+    """Build PriceGuidance from historical CPM data.
+
+    The multiplied suggested price is set as both ``recommended`` and ``p50``
+    so that buyers see the adjusted price regardless of which field they read.
+    """
     avg_cpm = estimation.get("avg_daily_cpm")
     if not avg_cpm or not isinstance(avg_cpm, (int, float)) or avg_cpm <= 0:
         return None
 
-    recommended = _round_currency(min(float(avg_cpm) * multiplier, max_suggested_cpm))
-    return PriceGuidance(floor=floor_cpm, recommended=recommended, p50=float(avg_cpm))
+    suggested = _round_currency(min(float(avg_cpm) * multiplier, max_suggested_cpm))
+    return PriceGuidance(floor=floor_cpm, recommended=suggested, p50=suggested)
 
 
 def _build_ext(segment: dict[str, Any]) -> dict[str, Any]:
