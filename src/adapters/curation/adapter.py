@@ -811,10 +811,11 @@ def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list
                 entry["creative_id"] = getattr(c, "creative_id", None) or ""
                 fmt = getattr(c, "format_id", None)
                 if fmt:
-                    entry["format_id"] = fmt.get("id") if isinstance(fmt, dict) else getattr(fmt, "id", str(fmt))
+                    raw_id = fmt.get("id") if isinstance(fmt, dict) else getattr(fmt, "id", str(fmt))
+                    entry["format_id"] = str(raw_id) if raw_id else str(fmt)
                 name = getattr(c, "name", None)
                 if name:
-                    entry["name"] = name
+                    entry["name"] = str(name)
                 # TODO(pubx): Hack for demo — reads snippet from assets dict
                 # because the Pydantic model rejects root-level snippet fields.
                 # Proper implementation should use sync_creatives with a curation
@@ -849,7 +850,7 @@ def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list
                 if fmt:
                     agent_url = fmt.get("agent_url") if isinstance(fmt, dict) else getattr(fmt, "agent_url", None)
                 if agent_url:
-                    entry["agent_url"] = agent_url
+                    entry["agent_url"] = str(agent_url)
                 assignments.append(entry)
             return assignments
 
