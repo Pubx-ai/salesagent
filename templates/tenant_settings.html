@@ -2269,6 +2269,7 @@ Exclude any products that don't match the brand's tone.</pre>
                 {% set has_ai = ai_config.get('api_key') or tenant.gemini_api_key %}
                 {% set current_provider = ai_config.get('provider', 'gemini') %}
                 {% set current_model = ai_config.get('model', '') %}
+                {% set current_fallback_models = ai_config.get('fallback_models', []) %}
 
                 {% if not has_ai %}
                 <div class="alert alert-warning" style="padding: 0.75rem; background: #fef3c7; border: 1px solid #fbbf24; border-radius: 6px; margin-bottom: 1rem;">
@@ -2309,6 +2310,14 @@ Exclude any products that don't match the brand's tone.</pre>
                             </select>
                         </div>
                         <small>Select the specific model to use. <span id="model-count"></span></small>
+                    </div>
+
+                    <div class="form-group" id="fallback_models_group" style="display: none;">
+                        <label for="fallback_models">Fallback Models (optional)</label>
+                        <input type="text" id="fallback_models" name="fallback_models"
+                               value="{{ current_fallback_models | join(', ') if current_fallback_models else '' }}"
+                               placeholder="e.g. openai/gpt-4o, google/gemini-2.0-flash">
+                        <small>Comma-separated list of models to try if the primary model fails. Only available with Vercel AI Gateway.</small>
                     </div>
 
                     <div class="form-group">
@@ -2352,6 +2361,7 @@ Exclude any products that don't match the brand's tone.</pre>
                 const currentProvider = '{{ current_provider }}';
                 const currentModel = '{{ current_model }}';
                 let aiModelsData = null;
+                const currentFallbackModels = '{{ current_fallback_models | join(", ") if current_fallback_models else '' }}';
 
                 // Preferred order for providers (most common first)
                 const providerOrder = [
@@ -2480,6 +2490,20 @@ Exclude any products that don't match the brand's tone.</pre>
                         apiKeyLink.textContent = 'Get ' + providerInfo.name + ' key';
                     } else {
                         apiKeyLink.style.display = 'none';
+                    }
+
+                    // Show/hide fallback models field (Vercel only)
+                    const fallbackGroup = document.getElementById('fallback_models_group');
+                    if (fallbackGroup) {
+                        if (provider === 'vercel') {
+                            fallbackGroup.style.display = '';
+                            // Populate with saved value on initial load
+                            if (provider === currentProvider && currentFallbackModels) {
+                                document.getElementById('fallback_models').value = currentFallbackModels;
+                            }
+                        } else {
+                            fallbackGroup.style.display = 'none';
+                        }
                     }
                 }
 
