@@ -312,6 +312,25 @@ class TestAIServiceFactory:
             model = factory.create_model(tenant_ai_config=tenant_config)
             assert isinstance(model, FallbackModel)
 
+    def test_vercel_fallback_catches_validation_errors(self):
+        """FallbackModel is configured with custom fallback_on (not just default)."""
+        from pydantic_ai.exceptions import UnexpectedModelBehavior
+        from pydantic_ai.models.fallback import FallbackModel
+
+        with patch.dict(os.environ, {}, clear=True):
+            factory = AIServiceFactory()
+            tenant_config = {
+                "provider": "vercel",
+                "model": "google/gemini-3-flash",
+                "api_key": "vercel-key",
+                "fallback_models": ["openai/gpt-5.4-mini"],
+            }
+            model = factory.create_model(tenant_ai_config=tenant_config)
+            assert isinstance(model, FallbackModel)
+            # Verify the fallback condition function handles UnexpectedModelBehavior
+            # (FallbackModel wraps fallback_on into an internal function)
+            assert model._fallback_on(UnexpectedModelBehavior("test validation error"))
+
     def test_create_model_vercel_without_fallbacks_unchanged(self):
         """Factory returns OpenAIChatModel when vercel has no fallback_models."""
         from pydantic_ai.models.openai import OpenAIChatModel
