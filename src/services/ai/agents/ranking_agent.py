@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, NativeOutput
+from pydantic_ai import Agent, PromptedOutput
 
 from src.core.schemas import Product
 
@@ -56,9 +56,9 @@ def create_ranking_agent(model: Any) -> Agent[None, ProductRankingResult]:
     """
     return Agent(
         model=model,
-        # Use NativeOutput (response_format json_schema) instead of tool-based output —
-        # tool calling fails with Gemini models via Vercel AI Gateway's OpenAI-compat API
-        output_type=NativeOutput(ProductRankingResult),
+        # Use PromptedOutput for cross-provider compatibility — both tool-based and native
+        # structured output fail with Gemini models via Vercel AI Gateway's OpenAI-compat API
+        output_type=PromptedOutput(ProductRankingResult),
         system_prompt=RANKING_SYSTEM_PROMPT,
     )
 
