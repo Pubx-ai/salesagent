@@ -30,6 +30,10 @@ class TenantAIConfig(BaseModel):
     # API key (encrypted in database, decrypted when loaded)
     api_key: str | None = None
 
+    # Fallback models for providers that support it (e.g., Vercel AI Gateway)
+    # Models are tried in order if the primary model fails
+    fallback_models: list[str] | None = None
+
     # Observability
     logfire_token: str | None = None
 

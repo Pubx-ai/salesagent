@@ -126,9 +126,12 @@ class AIServiceFactory:
 
         # Create model with Provider that has API key directly configured
         # This avoids setting global environment variables
-        return self._create_provider_model(provider, model_name, api_key)
+        fallback_models = config.fallback_models or []
+        return self._create_provider_model(provider, model_name, api_key, fallback_models=fallback_models)
 
-    def _create_provider_model(self, provider: str, model_name: str, api_key: str | None) -> Any:
+    def _create_provider_model(
+        self, provider: str, model_name: str, api_key: str | None, *, fallback_models: list[str] | None = None
+    ) -> Any:
         """Create a Pydantic AI model with explicit API key via Provider.
 
         This passes the API key directly to the Provider constructor,
@@ -195,9 +198,17 @@ class AIServiceFactory:
             from pydantic_ai.models.openai import OpenAIChatModel
             from pydantic_ai.providers.vercel import VercelProvider
 
-            if api_key:
-                return OpenAIChatModel(model_name, provider=VercelProvider(api_key=api_key))
-            return OpenAIChatModel(model_name, provider=VercelProvider())
+            vercel_provider = VercelProvider(api_key=api_key) if api_key else VercelProvider()
+            primary = OpenAIChatModel(model_name, provider=vercel_provider)
+
+            if fallback_models:
+                from pydantic_ai.models.fallback import FallbackModel
+
+                fallbacks = [OpenAIChatModel(m, provider=vercel_provider) for m in fallback_models]
+                logger.info("Created Vercel FallbackModel: primary=%s, fallbacks=%s", model_name, fallback_models)
+                return FallbackModel(primary, *fallbacks)
+
+            return primary
 
         else:
             # Fallback: use model string and let Pydantic AI resolve it
