@@ -202,14 +202,11 @@ class AIServiceFactory:
             primary = OpenAIChatModel(model_name, provider=vercel_provider)
 
             if fallback_models:
-                from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
                 from pydantic_ai.models.fallback import FallbackModel
 
                 fallbacks = [OpenAIChatModel(m, provider=vercel_provider) for m in fallback_models]
                 logger.info("Created Vercel FallbackModel: primary=%s, fallbacks=%s", model_name, fallback_models)
-                # Fall back on both API errors and output validation failures
-                # (some models via Vercel Gateway don't support structured output properly)
-                return FallbackModel(primary, *fallbacks, fallback_on=(ModelAPIError, UnexpectedModelBehavior))
+                return FallbackModel(primary, *fallbacks)
 
             return primary
 
