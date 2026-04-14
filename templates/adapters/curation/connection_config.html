@@ -118,41 +118,35 @@ Expected context variables:
         </div>
 
         <h4 style="margin-top: 2rem; margin-bottom: 1rem;">AI Segment Ranking</h4>
-        <p class="text-muted" style="margin-bottom: 1rem; font-size: 0.875rem;">
-            AI ranking matches catalog segments to buyer briefs using an LLM.
-            Configure an API key here or set <code>GEMINI_API_KEY</code> as an environment variable.
-        </p>
-
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-            <div class="form-group">
-                <label for="curation_ai_provider">AI Provider</label>
-                <select id="curation_ai_provider" name="curation_ai_provider"
-                        style="width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 6px;">
-                    <option value="gemini" {% if not adapter_config or adapter_config.get('ai_provider', 'gemini') == 'gemini' %}selected{% endif %}>Google Gemini</option>
-                    <option value="anthropic" {% if adapter_config and adapter_config.get('ai_provider') == 'anthropic' %}selected{% endif %}>Anthropic Claude</option>
-                    <option value="openai" {% if adapter_config and adapter_config.get('ai_provider') == 'openai' %}selected{% endif %}>OpenAI</option>
-                </select>
-            </div>
-
-            <div class="form-group">
-                <label for="curation_ai_model">Model</label>
-                <input type="text" id="curation_ai_model" name="curation_ai_model"
-                       value="{{ adapter_config.get('ai_model', 'gemini-2.0-flash') if adapter_config else 'gemini-2.0-flash' }}"
-                       placeholder="gemini-2.0-flash">
-                <small class="form-text text-muted">
-                    Model name (e.g. gemini-2.0-flash, gemini-2.5-pro, claude-sonnet-4-20250514)
-                </small>
-            </div>
-        </div>
-
-        <div class="form-group">
-            <label for="curation_ai_api_key">API Key</label>
-            <input type="password" id="curation_ai_api_key" name="curation_ai_api_key"
-                   value=""
-                   placeholder="{% if adapter_config and adapter_config.get('ai_api_key_set') %}••••••••  (saved){% else %}Enter API key or set GEMINI_API_KEY env var{% endif %}">
-            <small class="form-text text-muted">
-                Leave blank to keep existing key. Falls back to <code>GEMINI_API_KEY</code> environment variable if not set.
-            </small>
+        <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
+            {% if adapter_config and adapter_config.get('ai_api_key_set') %}
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="color: #10b981; font-size: 1.1em;">&#10003;</span>
+                    <span>
+                        <strong>AI Configured</strong> &mdash;
+                        {{ adapter_config.get('ai_provider', 'gemini') | title }}
+                        {% if adapter_config.get('ai_model') %}({{ adapter_config.get('ai_model') }}){% endif %}
+                    </span>
+                </div>
+                <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: #6b7280;">
+                    AI ranking matches catalog segments to buyer briefs using an LLM.
+                    <a href="#integrations" onclick="document.querySelector('[data-section=integrations]').click(); return false;">
+                        Change AI settings in Integrations
+                    </a>
+                </p>
+            {% else %}
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="color: #f59e0b; font-size: 1.1em;">&#9888;</span>
+                    <span><strong>AI Not Configured</strong></span>
+                </div>
+                <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: #6b7280;">
+                    AI segment ranking is disabled. Configure an AI provider in the
+                    <a href="#integrations" onclick="document.querySelector('[data-section=integrations]').click(); return false;">
+                        Integrations tab
+                    </a>
+                    to enable intelligent segment matching.
+                </p>
+            {% endif %}
         </div>
 
         <h4 style="margin-top: 2rem; margin-bottom: 1rem;">Advanced</h4>
@@ -211,38 +205,22 @@ function saveCurationConfig() {
         return;
     }
 
-    const aiProvider = document.getElementById('curation_ai_provider').value;
-    const aiModel = document.getElementById('curation_ai_model').value;
-    const aiApiKey = document.getElementById('curation_ai_api_key').value;
-
-    const saveAdapterConfig = fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapter-config', {
+    fetch(scriptRoot + '/api/tenant/' + tenantId + '/adapter-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({ adapter_type: 'curation', config: config })
-    });
-
-    const aiFormData = new FormData();
-    aiFormData.append('ai_provider', aiProvider);
-    aiFormData.append('ai_model', aiModel);
-    if (aiApiKey) {
-        aiFormData.append('ai_api_key', aiApiKey);
-    }
-
-    const saveAiConfig = fetch(scriptRoot + '/tenant/' + tenantId + '/settings/ai', {
-        method: 'POST',
-        credentials: 'same-origin',
-        body: aiFormData
-    });
-
-    Promise.all([saveAdapterConfig, saveAiConfig])
-        .then(responses => Promise.all(responses.map(r => r.ok ? r : Promise.reject(r))))
-        .then(() => {
+    })
+    .then(response => {
+        if (response.ok) {
             showNotification('Curation configuration saved successfully', 'success');
-        })
-        .catch(error => {
-            showNotification('Error saving configuration: ' + (error.message || 'Unknown error'), 'error');
-        });
+        } else {
+            return Promise.reject(response);
+        }
+    })
+    .catch(error => {
+        showNotification('Error saving configuration: ' + (error.message || 'Unknown error'), 'error');
+    });
 }
 
 function testCurationConnection() {
