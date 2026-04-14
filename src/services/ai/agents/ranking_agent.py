@@ -121,6 +121,23 @@ async def rank_products_async(
         ProductRankingResult with rankings for each product
     """
     prompt = build_ranking_prompt(custom_prompt, brief, products)
-    result = await agent.run(prompt)
+    try:
+        result = await agent.run(prompt)
+    except Exception as exc:
+        # Log raw response body on failure so we can see exactly what the model returned
+        body = getattr(exc, "body", None)
+        message = getattr(exc, "message", str(exc))
+        logger.error("AI ranking FAILED — error: %s", message)
+        if body is not None:
+            logger.error("AI ranking FAILED — raw model response body:\n%s", body)
+        raise
+
+    # Log the model that handled the request and full response for debugging
+    messages = result.all_messages()
+    for msg in messages:
+        if hasattr(msg, "model_name"):
+            logger.info("AI ranking handled by model: %s", msg.model_name)
+    logger.debug("AI ranking full response messages:\n%s", messages)
+
     # pydantic-ai 1.x uses .output for structured data
     return result.output
