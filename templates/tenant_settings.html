@@ -2432,7 +2432,14 @@ Exclude any products that don't match the brand's tone.</pre>
                     const apiKeyLink = document.getElementById('api-key-link');
 
                     if (!provider || !aiModelsData[provider]) {
-                        container.innerHTML = '<select id="ai_model" name="ai_model"><option value="">Select a provider first</option></select>';
+                        const select = document.createElement('select');
+                        select.id = 'ai_model';
+                        select.name = 'ai_model';
+                        const placeholder = document.createElement('option');
+                        placeholder.value = '';
+                        placeholder.textContent = 'Select a provider first';
+                        select.appendChild(placeholder);
+                        container.replaceChildren(select);
                         document.getElementById('model-count').textContent = '';
                         return;
                     }
@@ -2442,18 +2449,27 @@ Exclude any products that don't match the brand's tone.</pre>
 
                     if (models.length === 0) {
                         // Free-text input for providers with dynamic model lists (e.g. Vercel)
-                        const currentVal = (provider === currentProvider) ? currentModel : '';
-                        container.innerHTML = '<input type="text" id="ai_model" name="ai_model" value="' + currentVal + '" placeholder="e.g. anthropic/claude-sonnet-4-5">';
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.id = 'ai_model';
+                        input.name = 'ai_model';
+                        input.value = (provider === currentProvider) ? currentModel : '';
+                        input.placeholder = 'e.g. anthropic/claude-sonnet-4-5';
+                        container.replaceChildren(input);
                         document.getElementById('model-count').textContent = 'Enter model name manually';
                     } else {
                         // Dropdown for providers with known model lists
-                        let selectHtml = '<select id="ai_model" name="ai_model">';
+                        const select = document.createElement('select');
+                        select.id = 'ai_model';
+                        select.name = 'ai_model';
                         models.forEach(function(model) {
-                            const selected = (model === currentModel) ? ' selected' : '';
-                            selectHtml += '<option value="' + model + '"' + selected + '>' + model + '</option>';
+                            const option = document.createElement('option');
+                            option.value = model;
+                            option.textContent = model;
+                            option.selected = (model === currentModel);
+                            select.appendChild(option);
                         });
-                        selectHtml += '</select>';
-                        container.innerHTML = selectHtml;
+                        container.replaceChildren(select);
                         document.getElementById('model-count').textContent = providerInfo.models.length + ' models available';
                     }
 
