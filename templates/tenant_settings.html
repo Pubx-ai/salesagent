@@ -2361,7 +2361,7 @@ Exclude any products that don't match the brand's tone.</pre>
                 const currentProvider = '{{ current_provider }}';
                 const currentModel = '{{ current_model }}';
                 let aiModelsData = null;
-                const currentFallbackModels = '{{ current_fallback_models | join(", ") if current_fallback_models else '' }}';
+                const currentFallbackModels = {{ (current_fallback_models | join(", ")) | tojson }};
 
                 // Preferred order for providers (most common first)
                 const providerOrder = [
@@ -2495,15 +2495,7 @@ Exclude any products that don't match the brand's tone.</pre>
                     // Show/hide fallback models field (Vercel only)
                     const fallbackGroup = document.getElementById('fallback_models_group');
                     if (fallbackGroup) {
-                        if (provider === 'vercel') {
-                            fallbackGroup.style.display = '';
-                            // Populate with saved value on initial load
-                            if (provider === currentProvider && currentFallbackModels) {
-                                document.getElementById('fallback_models').value = currentFallbackModels;
-                            }
-                        } else {
-                            fallbackGroup.style.display = 'none';
-                        }
+                        fallbackGroup.style.display = (provider === 'vercel') ? '' : 'none';
                     }
                 }
 
