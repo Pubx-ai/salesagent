@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, PromptedOutput
 
 from src.core.schemas import Product
 
@@ -56,7 +56,9 @@ def create_ranking_agent(model: Any) -> Agent[None, ProductRankingResult]:
     """
     return Agent(
         model=model,
-        output_type=ProductRankingResult,
+        # Use PromptedOutput for cross-provider compatibility — tool-based output
+        # fails with some models via Vercel AI Gateway (e.g., Gemini)
+        output_type=PromptedOutput(ProductRankingResult),
         system_prompt=RANKING_SYSTEM_PROMPT,
     )
 
