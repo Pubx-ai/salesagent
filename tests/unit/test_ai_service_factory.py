@@ -89,6 +89,11 @@ class TestBuildModelString:
         result = build_model_string("anthropic", "claude-sonnet-4-20250514")
         assert result == "anthropic:claude-sonnet-4-20250514"
 
+    def test_vercel_provider(self):
+        """Vercel uses vercel prefix."""
+        result = build_model_string("vercel", "anthropic/claude-sonnet-4-5")
+        assert result == "vercel:anthropic/claude-sonnet-4-5"
+
 
 class TestGetPlatformDefaults:
     """Tests for get_platform_defaults function."""
@@ -115,6 +120,21 @@ class TestGetPlatformDefaults:
             defaults = get_platform_defaults()
             assert defaults["provider"] == "gemini"
             assert defaults["model"] == "gemini-2.0-flash"
+
+    def test_vercel_api_key_from_env(self):
+        """Platform defaults resolve Vercel API key from environment."""
+        with patch.dict(
+            os.environ,
+            {
+                "PYDANTIC_AI_PROVIDER": "vercel",
+                "PYDANTIC_AI_MODEL": "anthropic/claude-sonnet-4-5",
+                "VERCEL_AI_GATEWAY_API_KEY": "vercel-test-key",
+            },
+            clear=False,
+        ):
+            defaults = get_platform_defaults()
+            assert defaults["provider"] == "vercel"
+            assert defaults["api_key"] == "vercel-test-key"
 
 
 class TestAIServiceFactory:
@@ -215,6 +235,37 @@ class TestAIServiceFactory:
             assert effective["provider"] == "anthropic"
             assert effective["model"] == "claude-sonnet-4-20250514"
             assert effective["source"] == "tenant"
+
+    def test_create_model_vercel_provider(self):
+        """Factory creates OpenAIChatModel with VercelProvider for vercel provider."""
+        from pydantic_ai.models.openai import OpenAIChatModel
+
+        with patch.dict(os.environ, {}, clear=True):
+            factory = AIServiceFactory()
+            tenant_config = {
+                "provider": "vercel",
+                "model": "anthropic/claude-sonnet-4-5",
+                "api_key": "vercel-key",
+            }
+            model = factory.create_model(tenant_ai_config=tenant_config)
+            assert isinstance(model, OpenAIChatModel)
+
+    def test_create_model_vercel_without_key(self):
+        """Factory creates Vercel model without explicit key (uses env var)."""
+        from pydantic_ai.models.openai import OpenAIChatModel
+
+        with patch.dict(
+            os.environ,
+            {"VERCEL_AI_GATEWAY_API_KEY": "env-vercel-key"},
+            clear=True,
+        ):
+            factory = AIServiceFactory()
+            tenant_config = {
+                "provider": "vercel",
+                "model": "openai/gpt-4o",
+            }
+            model = factory.create_model(tenant_ai_config=tenant_config)
+            assert isinstance(model, OpenAIChatModel)
 
     def test_model_receives_api_key_via_provider(self):
         """Factory passes API key directly via Provider, not environment variables."""

@@ -66,6 +66,7 @@ def _get_provider_api_key(provider: str) -> str | None:
         "anthropic": "ANTHROPIC_API_KEY",
         "groq": "GROQ_API_KEY",
         "bedrock": "AWS_ACCESS_KEY_ID",  # Bedrock uses AWS credentials
+        "vercel": "VERCEL_AI_GATEWAY_API_KEY",
     }
     env_var = provider_env_vars.get(provider)
     if env_var:

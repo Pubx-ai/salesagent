@@ -191,6 +191,14 @@ class AIServiceFactory:
                 return CohereModel(model_name, provider=CohereProvider(api_key=api_key))
             return CohereModel(model_name, provider="cohere")
 
+        elif provider == "vercel":
+            from pydantic_ai.models.openai import OpenAIChatModel
+            from pydantic_ai.providers.vercel import VercelProvider
+
+            if api_key:
+                return OpenAIChatModel(model_name, provider=VercelProvider(api_key=api_key))
+            return OpenAIChatModel(model_name, provider=VercelProvider())
+
         else:
             # Fallback: use model string and let Pydantic AI resolve it
             # This handles gateway providers and any new providers
