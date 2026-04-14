@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, capture_run_messages
 
 from src.core.schemas import Product
 
@@ -121,16 +121,14 @@ async def rank_products_async(
         ProductRankingResult with rankings for each product
     """
     prompt = build_ranking_prompt(custom_prompt, brief, products)
-    try:
-        result = await agent.run(prompt)
-    except Exception as exc:
-        # Log raw response body on failure so we can see exactly what the model returned
-        body = getattr(exc, "body", None)
-        message = getattr(exc, "message", str(exc))
-        logger.error("AI ranking FAILED — error: %s", message)
-        if body is not None:
-            logger.error("AI ranking FAILED — raw model response body:\n%s", body)
-        raise
+    with capture_run_messages() as run_messages:
+        try:
+            result = await agent.run(prompt)
+        except Exception as exc:
+            # Log the full message exchange so we can see exactly what the model returned
+            logger.error("AI ranking FAILED — error: %s", getattr(exc, "message", str(exc)))
+            logger.error("AI ranking FAILED — full message exchange:\n%s", run_messages)
+            raise
 
     # Log the model that handled the request and full response for debugging
     messages = result.all_messages()
