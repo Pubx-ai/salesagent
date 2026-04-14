@@ -536,6 +536,7 @@ def update_ai(tenant_id):
         model = request.form.get("ai_model", "").strip()
         api_key = request.form.get("ai_api_key", "").strip()
         logfire_token = request.form.get("logfire_token", "").strip()
+        fallback_models_raw = request.form.get("fallback_models", "").strip()
 
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -564,6 +565,15 @@ def update_ai(tenant_id):
             # Preserve settings if they exist
             if existing_config.get("settings"):
                 new_config["settings"] = existing_config["settings"]
+
+            # Handle fallback models (Vercel AI Gateway)
+            if fallback_models_raw:
+                parsed = [m.strip() for m in fallback_models_raw.split(",") if m.strip()]
+                if parsed:
+                    new_config["fallback_models"] = parsed
+            elif existing_config.get("fallback_models") and not fallback_models_raw:
+                # Clear fallback models if the field was submitted empty
+                pass  # Don't carry over — user cleared the field
 
             # Handle Logfire token: use new one if provided, otherwise keep existing
             # Skip placeholder value that indicates existing token
