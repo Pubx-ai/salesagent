@@ -567,13 +567,11 @@ def update_ai(tenant_id):
                 new_config["settings"] = existing_config["settings"]
 
             # Handle fallback models (Vercel AI Gateway)
+            # Empty submission intentionally clears the stored value — nothing is written to new_config.
             if fallback_models_raw:
                 parsed = [m.strip() for m in fallback_models_raw.split(",") if m.strip()]
                 if parsed:
                     new_config["fallback_models"] = parsed
-            elif existing_config.get("fallback_models") and not fallback_models_raw:
-                # Clear fallback models if the field was submitted empty
-                pass  # Don't carry over — user cleared the field
 
             # Handle Logfire token: use new one if provided, otherwise keep existing
             # Skip placeholder value that indicates existing token
