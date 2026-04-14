@@ -767,6 +767,10 @@ def get_ai_models(tenant_id):
     for provider in by_provider:
         by_provider[provider] = sorted(set(by_provider[provider]))
 
+    # Inject providers that won't appear in KnownModelName (dynamic model lists)
+    if "vercel" not in by_provider:
+        by_provider["vercel"] = []
+
     # Define provider metadata for UI
     provider_info = {
         "google-gla": {"name": "Google Gemini", "key_url": "https://aistudio.google.com/app/apikey"},
@@ -797,6 +801,12 @@ def get_ai_models(tenant_id):
             "gateway": True,
         },
         "gateway/groq": {"name": "Gateway: Groq", "key_url": "https://ai.pydantic.dev/gateway", "gateway": True},
+        # Vercel AI Gateway
+        "vercel": {
+            "name": "Vercel AI Gateway",
+            "key_url": "https://vercel.com/docs/ai-gateway",
+            "gateway": True,
+        },
     }
 
     # Build response with provider info
