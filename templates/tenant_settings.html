@@ -2393,7 +2393,9 @@ Exclude any products that don't match the brand's tone.</pre>
                             const info = aiModelsData[provider];
                             const option = document.createElement('option');
                             option.value = provider;
-                            option.textContent = info.name + ' (' + info.models.length + ' models)';
+                            option.textContent = info.models.length > 0
+                                ? info.name + ' (' + info.models.length + ' models)'
+                                : info.name;
                             if (provider === currentProvider || (currentProvider === 'gemini' && provider === 'google-gla')) {
                                 option.selected = true;
                             }
