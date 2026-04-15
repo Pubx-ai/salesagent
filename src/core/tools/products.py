@@ -562,25 +562,10 @@ async def _get_products_impl(
                 if not has_matching_pricing:
                     continue
 
-            # Filter by format_types
-            if req.filters.format_types:
-                # Product.format_ids is list[str] (format IDs), need to look up types from FORMAT_REGISTRY
-                from src.core.schemas import get_format_by_id
-
-                product_format_types = set()
-                for format_id in product.format_ids:
-                    if isinstance(format_id, str):
-                        format_obj = get_format_by_id(format_id)
-                        if format_obj:
-                            product_format_types.add(format_obj.type)
-                    elif isinstance(format_id, FormatId):
-                        # FormatId object — look up the format for its type
-                        format_obj = get_format_by_id(format_id.id)
-                        if format_obj:
-                            product_format_types.add(format_obj.type)
-
-                if not any(fmt_type in product_format_types for fmt_type in req.filters.format_types):
-                    continue
+            # TODO(pubx): Re-enable format_types filtering once curation segments
+            # reliably populate inventory_formats and creative agent registry is stable.
+            # if req.filters.format_types:
+            #     ...
 
             # Filter by format_ids
             if req.filters.format_ids:
