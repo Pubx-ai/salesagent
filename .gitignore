@@ -157,6 +157,9 @@ docs/TRANSFORMATION_PRESENTATION.md
 docs/superpowers/
 docs/curation-todos.md
 
+# Cursor IDE hook state — per-machine scratchpad, not useful to other checkouts.
+.cursor/hooks/state/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 .beads-credential-key
