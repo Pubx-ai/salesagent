@@ -1,4 +1,11 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(pnpm lint *)",
+      "Bash(bun test *)",
+      "Bash(pnpm test:unit *)"
+    ]
+  },
   "hooks": {
     "PreCompact": [
       {
