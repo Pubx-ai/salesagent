@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import threading
 from typing import Any
 
 import httpx
@@ -16,23 +17,52 @@ from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError
 
 logger = logging.getLogger(__name__)
 
+# Process-wide pool of httpx.Client instances keyed by (base_url, timeout).
+# Each CurationAdapter instantiation used to build three fresh httpx.Clients,
+# defeating connection pooling and eating TCP/TLS handshake cost on every
+# request. We now share one client per (base_url, timeout) across adapter
+# instances; httpx.Client is thread-safe for concurrent requests, so reusing
+# it is strictly better for throughput.
+_CLIENT_CACHE: dict[tuple[str, float], httpx.Client] = {}
+_CLIENT_CACHE_LOCK = threading.Lock()
+
+
+def _get_or_create_client(base_url: str, timeout: float) -> httpx.Client:
+    key = (base_url, timeout)
+    existing = _CLIENT_CACHE.get(key)
+    if existing is not None and not existing.is_closed:
+        return existing
+    with _CLIENT_CACHE_LOCK:
+        existing = _CLIENT_CACHE.get(key)
+        if existing is not None and not existing.is_closed:
+            return existing
+        client = httpx.Client(base_url=base_url, timeout=timeout)
+        _CLIENT_CACHE[key] = client
+        return client
+
+
+def close_all_cached_clients() -> None:
+    """Close every cached httpx.Client. Intended for test teardown / shutdown hooks."""
+    with _CLIENT_CACHE_LOCK:
+        for client in list(_CLIENT_CACHE.values()):
+            if not client.is_closed:
+                client.close()
+        _CLIENT_CACHE.clear()
+
 
 class CurationHttpClient:
     """Base synchronous HTTP client for curation services.
 
-    Uses httpx.Client (sync) because AdServerAdapter methods are synchronous.
-    A single client instance is reused across calls for connection pooling.
+    Uses a shared, process-wide ``httpx.Client`` per ``(base_url, timeout)``
+    so connection pooling works across adapter instantiations.
     """
 
     def __init__(self, base_url: str, timeout: float = 30.0):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        self._client: httpx.Client | None = None
 
     def _get_client(self) -> httpx.Client:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.Client(base_url=self._base_url, timeout=self._timeout)
-        return self._client
+        return _get_or_create_client(self._base_url, self._timeout)
 
     def _request(
         self,
@@ -96,5 +126,9 @@ class CurationHttpClient:
             ) from e
 
     def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            self._client.close()
+        """No-op: the underlying httpx.Client is process-wide shared.
+
+        Closing it here would break the next adapter instance using the same
+        ``(base_url, timeout)``. Use ``close_all_cached_clients()`` at process
+        shutdown / test teardown instead.
+        """

@@ -807,9 +807,14 @@ async def _get_products_impl(
                         existing_ext = dict(product.ext.model_extra or {})
                     product.ext = ExtensionObject.model_validate({**existing_ext, "relevance_score": round(score, 2)})
 
-                # Log the ranking results
-                for r in ranking_result.rankings:
-                    logger.info(f"[AI_RANKING] {r.product_id}: score={r.relevance_score:.2f}, reason={r.reason}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    for r in ranking_result.rankings:
+                        logger.debug(
+                            "[AI_RANKING] %s: score=%.2f, reason=%s",
+                            r.product_id,
+                            r.relevance_score,
+                            r.reason,
+                        )
 
                 logger.info(
                     f"[GET_PRODUCTS] AI ranking applied: {len(ranking_result.rankings)} products ranked, "
