@@ -1939,3 +1939,120 @@ class TestRankingPromptLocation:
             "src/adapters/curation/ranking.py only — keeping a copy in "
             "services/ai would drift the two."
         )
+
+
+class TestCurationAdapterGetDeliveryForTool:
+    """Tool-shaped entry: accepts the tool's request, walks the adapter's own
+    check_media_buy_status + get_media_buy_delivery, builds a
+    GetMediaBuyDeliveryResponse. Replaces the inline _adapter_managed_delivery
+    helper that used to live in src/core/tools/media_buy_delivery.py."""
+
+    def _setup_adapter_with_buys(self, *buys):
+        from unittest.mock import MagicMock
+
+        from src.adapters.curation.adapter import ListMediaBuysResult
+
+        adapter = _make_adapter()
+        adapter.list_media_buys = MagicMock(
+            return_value=ListMediaBuysResult(media_buys=list(buys), truncated=False, total_fetched=len(buys))
+        )
+        return adapter
+
+    def test_browse_all_when_no_filters(self):
+        from datetime import UTC, datetime
+        from unittest.mock import MagicMock
+
+        from src.core.schemas import (
+            AdapterGetMediaBuyDeliveryResponse,
+            CheckMediaBuyStatusResponse,
+            DeliveryTotals,
+            GetMediaBuyDeliveryRequest,
+        )
+        from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+
+        buy = MagicMock()
+        buy.media_buy_id = "mb-1"
+        adapter = self._setup_adapter_with_buys(buy)
+        adapter.check_media_buy_status = MagicMock(
+            return_value=CheckMediaBuyStatusResponse(media_buy_id="mb-1", buyer_ref="b-1", status="active")
+        )
+        adapter.get_media_buy_delivery = MagicMock(
+            return_value=AdapterGetMediaBuyDeliveryResponse(
+                media_buy_id="mb-1",
+                reporting_period=MediaBuyReportingPeriod(
+                    start=datetime(2026, 4, 1, tzinfo=UTC),
+                    end=datetime(2026, 4, 30, tzinfo=UTC),
+                ),
+                currency="USD",
+                totals=DeliveryTotals(impressions=1000.0, spend=5.0, clicks=None, video_completions=None),
+                by_package=[],
+            )
+        )
+
+        req = GetMediaBuyDeliveryRequest(media_buy_ids=None, buyer_refs=None)
+        period = MediaBuyReportingPeriod(
+            start=datetime(2026, 4, 1, tzinfo=UTC),
+            end=datetime(2026, 4, 30, tzinfo=UTC),
+        )
+
+        result = adapter.get_delivery_for_tool(req, period)
+
+        assert result.aggregated_totals.media_buy_count == 1
+        assert result.aggregated_totals.impressions == 1000.0
+        adapter.list_media_buys.assert_called_once_with()
+
+    def test_pending_buy_keeps_zero_totals_and_status(self):
+        """Buys in pending_activation/paused states with no delivery yet are
+        kept with zeroed totals instead of failed with adapter_error."""
+        from datetime import UTC, datetime
+        from unittest.mock import MagicMock
+
+        from src.core.exceptions import AdCPAdapterError
+        from src.core.schemas import (
+            CheckMediaBuyStatusResponse,
+            GetMediaBuyDeliveryRequest,
+        )
+        from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+
+        adapter = _make_adapter()
+        adapter.check_media_buy_status = MagicMock(
+            return_value=CheckMediaBuyStatusResponse(media_buy_id="mb-1", buyer_ref="b-1", status="pending_activation")
+        )
+        adapter.get_media_buy_delivery = MagicMock(side_effect=AdCPAdapterError("no delivery yet"))
+
+        req = GetMediaBuyDeliveryRequest(media_buy_ids=["mb-1"], buyer_refs=None)
+        period = MediaBuyReportingPeriod(
+            start=datetime(2026, 4, 1, tzinfo=UTC),
+            end=datetime(2026, 4, 30, tzinfo=UTC),
+        )
+
+        result = adapter.get_delivery_for_tool(req, period)
+
+        assert result.aggregated_totals.media_buy_count == 1
+        assert result.aggregated_totals.impressions == 0.0
+        # MediaBuyDeliveryData.status uses internal statuses (FIXME salesagent-jz3y);
+        # adapter maps AdCP pending_activation -> internal ready at the schema boundary.
+        assert result.media_buy_deliveries[0].status == "ready"
+        assert result.errors is None or all(e.code != "adapter_error" for e in result.errors)
+
+    def test_unknown_media_buy_emits_not_found_error(self):
+        from datetime import UTC, datetime
+        from unittest.mock import MagicMock
+
+        from src.core.exceptions import AdCPNotFoundError
+        from src.core.schemas import GetMediaBuyDeliveryRequest
+        from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+
+        adapter = _make_adapter()
+        adapter.check_media_buy_status = MagicMock(side_effect=AdCPNotFoundError("mb-gone not found"))
+
+        req = GetMediaBuyDeliveryRequest(media_buy_ids=["mb-gone"], buyer_refs=None)
+        period = MediaBuyReportingPeriod(
+            start=datetime(2026, 4, 1, tzinfo=UTC),
+            end=datetime(2026, 4, 30, tzinfo=UTC),
+        )
+
+        result = adapter.get_delivery_for_tool(req, period)
+
+        assert result.errors is not None
+        assert any(e.code == "media_buy_not_found" for e in result.errors)

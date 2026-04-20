@@ -15,7 +15,14 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.core.schemas import (
+        GetMediaBuyDeliveryRequest,
+        GetMediaBuyDeliveryResponse,
+    )
+    from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
 
 from adcp.types.aliases import Package as ResponsePackage
 from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
@@ -583,6 +590,168 @@ class CurationAdapter(ToolProvider):
                 video_completions=None,
             ),
             by_package=[],
+        )
+
+    # AdCP statuses that indicate the buy is still active/expected — kept for
+    # delivery reporting even when the adapter has not yet emitted any metrics.
+    _ACTIVE_OR_EXPECTED_STATUSES: frozenset[str] = frozenset(
+        {"pending_activation", "pending_creative", "pending_manual", "scheduled", "active", "paused"}
+    )
+
+    def get_delivery_for_tool(
+        self,
+        req: GetMediaBuyDeliveryRequest,
+        reporting_period: MediaBuyReportingPeriod,
+    ) -> GetMediaBuyDeliveryResponse:
+        """Tool-shaped delivery entry for media_buy_delivery.
+
+        Honours both ``media_buy_ids`` and ``buyer_refs`` filters. When
+        neither is supplied the request is treated as "browse all" and routed
+        through ``list_media_buys`` so callers don't silently get an empty
+        result. Adapter outages become ``adapter_error``; genuine misses
+        keep ``media_buy_not_found``; pending buys retain their status
+        instead of being downgraded to ``not_found``.
+
+        Replaces the inline ``_adapter_managed_delivery`` helper that used to
+        live in ``src/core/tools/media_buy_delivery.py``.
+        """
+        from datetime import UTC, datetime
+
+        from src.core.exceptions import AdCPError, AdCPNotFoundError
+        from src.core.schemas import (
+            AggregatedTotals,
+            DeliveryTotals,
+            Error,
+            GetMediaBuyDeliveryResponse,
+            MediaBuyDeliveryData,
+            PricingModel,
+        )
+
+        # FIXME(salesagent-jz3y): MediaBuyDeliveryData.status uses internal statuses
+        # (ready/active/...) whereas CheckMediaBuyStatusResponse yields AdCP statuses
+        # (pending_activation/...). Map AdCP → internal at the schema boundary so the
+        # response validates; align terminology when the FIXME in delivery.py lands.
+        _ADCP_TO_INTERNAL_STATUS: dict[str, str] = {
+            "pending_activation": "ready",
+            "pending_creative": "ready",
+            "pending_manual": "ready",
+            "scheduled": "ready",
+        }
+
+        def _to_internal_status(adcp_status: str) -> str:
+            return _ADCP_TO_INTERNAL_STATUS.get(adcp_status, adcp_status)
+
+        requested_ids: list[str] = list(req.media_buy_ids or [])
+        buyer_refs: list[str] = list(req.buyer_refs or [])
+
+        if not requested_ids and buyer_refs:
+            try:
+                listed = self.list_media_buys(buyer_refs=buyer_refs)
+                for buy in getattr(listed, "media_buys", []) or []:
+                    mb_id = getattr(buy, "media_buy_id", None)
+                    if mb_id and mb_id not in requested_ids:
+                        requested_ids.append(mb_id)
+            except Exception as exc:
+                logger.warning(
+                    "Adapter list_media_buys failed for buyer_refs=%s: %s",
+                    buyer_refs,
+                    exc,
+                )
+
+        if not requested_ids and not buyer_refs:
+            try:
+                listed = self.list_media_buys()
+                for buy in getattr(listed, "media_buys", []) or []:
+                    mb_id = getattr(buy, "media_buy_id", None)
+                    if mb_id:
+                        requested_ids.append(mb_id)
+            except Exception as exc:
+                logger.warning("Adapter list_media_buys (browse all) failed: %s", exc)
+
+        deliveries: list[MediaBuyDeliveryData] = []
+        ext_errors: list[Error] = []
+        total_spend = 0.0
+        total_impressions = 0
+
+        for mb_id in requested_ids:
+            try:
+                status_resp = self.check_media_buy_status(mb_id, datetime.now(UTC))
+            except AdCPNotFoundError:
+                ext_errors.append(Error(code="media_buy_not_found", message=f"Media buy {mb_id} not found"))
+                continue
+            except AdCPError as exc:
+                logger.error("Adapter status lookup for %s raised %s: %s", mb_id, type(exc).__name__, exc)
+                ext_errors.append(Error(code="adapter_error", message=str(exc)))
+                continue
+            except Exception as exc:
+                logger.error("Unexpected error checking status for %s: %s", mb_id, exc, exc_info=True)
+                ext_errors.append(
+                    Error(code="adapter_error", message=f"Adapter error checking status for {mb_id}: {exc}")
+                )
+                continue
+
+            adapter_status = getattr(status_resp, "status", "active")
+            try:
+                adapter_resp = self.get_media_buy_delivery(mb_id, reporting_period, datetime.now(UTC))
+            except AdCPNotFoundError:
+                ext_errors.append(Error(code="media_buy_not_found", message=f"Media buy {mb_id} not found"))
+                continue
+            except AdCPError as exc:
+                # Pending or otherwise active buys may not have delivery yet — keep the
+                # row instead of failing it, but surface the adapter error for visibility.
+                if adapter_status in self._ACTIVE_OR_EXPECTED_STATUSES:
+                    logger.info(
+                        "Adapter has no delivery yet for %s (status=%s): %s",
+                        mb_id,
+                        adapter_status,
+                        exc,
+                    )
+                    deliveries.append(
+                        MediaBuyDeliveryData(
+                            media_buy_id=mb_id,
+                            buyer_ref=getattr(status_resp, "buyer_ref", None),
+                            status=_to_internal_status(adapter_status),
+                            pricing_model=PricingModel("cpm"),
+                            totals=DeliveryTotals(impressions=0.0, spend=0.0, clicks=None, video_completions=None),
+                            by_package=[],
+                        )
+                    )
+                    continue
+                ext_errors.append(Error(code="adapter_error", message=str(exc)))
+                continue
+            except Exception as exc:
+                logger.error("Unexpected error getting delivery for %s: %s", mb_id, exc, exc_info=True)
+                ext_errors.append(
+                    Error(code="adapter_error", message=f"Adapter error fetching delivery for {mb_id}: {exc}")
+                )
+                continue
+
+            deliveries.append(
+                MediaBuyDeliveryData(
+                    media_buy_id=mb_id,
+                    buyer_ref=getattr(status_resp, "buyer_ref", None),
+                    status=_to_internal_status(adapter_status),
+                    pricing_model=PricingModel("cpm"),
+                    totals=adapter_resp.totals,
+                    by_package=[],
+                )
+            )
+            total_spend += float(adapter_resp.totals.spend or 0)
+            total_impressions += int(adapter_resp.totals.impressions or 0)
+
+        return GetMediaBuyDeliveryResponse(
+            reporting_period={"start": reporting_period.start, "end": reporting_period.end},
+            currency="USD",
+            aggregated_totals=AggregatedTotals(
+                impressions=float(total_impressions),
+                spend=total_spend,
+                clicks=None,
+                video_completions=None,
+                media_buy_count=len(deliveries),
+            ),
+            media_buy_deliveries=deliveries,
+            errors=ext_errors or None,
+            context=req.context,
         )
 
     # ── Update media buy ───────────────────────────────────────────────

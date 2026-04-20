@@ -64,132 +64,6 @@ def _is_circuit_breaker_open(tenant_id: str) -> bool:
     return webhook_delivery_service.has_open_circuit_breaker(tenant_id)
 
 
-# AdCP statuses that indicate the buy is still active/expected — kept for delivery reporting
-# even when the adapter has not yet emitted any metrics.
-_ACTIVE_OR_EXPECTED_STATUSES: frozenset[str] = frozenset(
-    {"pending_activation", "pending_creative", "pending_manual", "scheduled", "active", "paused"}
-)
-
-
-def _adapter_managed_delivery(
-    adapter: Any,
-    req: GetMediaBuyDeliveryRequest,
-    reporting_period: "MediaBuyReportingPeriod",
-) -> GetMediaBuyDeliveryResponse:
-    """Fetch delivery from adapters that manage their own persistence.
-
-    Honours both ``media_buy_ids`` and ``buyer_refs`` filters. When neither is
-    supplied the request is treated as "browse all" and routed through the
-    adapter's ``list_media_buys`` API (when available) so we don't silently
-    return an empty result. Adapter outages are surfaced as ``adapter_error``
-    while genuine misses keep ``media_buy_not_found``, and pending buys retain
-    their status instead of being downgraded to ``not_found``.
-    """
-    from src.core.exceptions import AdCPError, AdCPNotFoundError
-
-    requested_ids: list[str] = list(req.media_buy_ids or [])
-    buyer_refs: list[str] = list(req.buyer_refs or [])
-
-    if not requested_ids and buyer_refs and hasattr(adapter, "list_media_buys"):
-        try:
-            listed = adapter.list_media_buys(buyer_refs=buyer_refs)
-            for buy in getattr(listed, "media_buys", []) or []:
-                mb_id = getattr(buy, "media_buy_id", None)
-                if mb_id and mb_id not in requested_ids:
-                    requested_ids.append(mb_id)
-        except Exception as exc:
-            logger.warning("Adapter list_media_buys failed for buyer_refs=%s: %s", buyer_refs, exc)
-
-    if not requested_ids and not buyer_refs and hasattr(adapter, "list_media_buys"):
-        try:
-            listed = adapter.list_media_buys()
-            for buy in getattr(listed, "media_buys", []) or []:
-                mb_id = getattr(buy, "media_buy_id", None)
-                if mb_id:
-                    requested_ids.append(mb_id)
-        except Exception as exc:
-            logger.warning("Adapter list_media_buys (browse all) failed: %s", exc)
-
-    deliveries: list[MediaBuyDeliveryData] = []
-    ext_errors: list[Error] = []
-    total_spend = 0.0
-    total_impressions = 0
-
-    for mb_id in requested_ids:
-        try:
-            status_resp = adapter.check_media_buy_status(mb_id, datetime.now(UTC))
-        except AdCPNotFoundError:
-            ext_errors.append(Error(code="media_buy_not_found", message=f"Media buy {mb_id} not found"))
-            continue
-        except AdCPError as exc:
-            logger.error("Adapter status lookup for %s raised %s: %s", mb_id, type(exc).__name__, exc)
-            ext_errors.append(Error(code="adapter_error", message=str(exc)))
-            continue
-        except Exception as exc:
-            logger.error("Unexpected error checking status for %s: %s", mb_id, exc, exc_info=True)
-            ext_errors.append(Error(code="adapter_error", message=f"Adapter error checking status for {mb_id}: {exc}"))
-            continue
-
-        adapter_status = getattr(status_resp, "status", "active")
-        try:
-            adapter_resp = adapter.get_media_buy_delivery(mb_id, reporting_period, datetime.now(UTC))
-        except AdCPNotFoundError:
-            ext_errors.append(Error(code="media_buy_not_found", message=f"Media buy {mb_id} not found"))
-            continue
-        except AdCPError as exc:
-            # Pending or otherwise active buys may not have delivery yet — keep the
-            # row instead of failing it, but surface the adapter error for visibility.
-            if adapter_status in _ACTIVE_OR_EXPECTED_STATUSES:
-                logger.info("Adapter has no delivery yet for %s (status=%s): %s", mb_id, adapter_status, exc)
-                deliveries.append(
-                    MediaBuyDeliveryData(
-                        media_buy_id=mb_id,
-                        buyer_ref=getattr(status_resp, "buyer_ref", None),
-                        status=adapter_status,
-                        pricing_model=PricingModel("cpm"),
-                        totals=DeliveryTotals(impressions=0.0, spend=0.0, clicks=None, video_completions=None),
-                        by_package=[],
-                    )
-                )
-                continue
-            ext_errors.append(Error(code="adapter_error", message=str(exc)))
-            continue
-        except Exception as exc:
-            logger.error("Unexpected error getting delivery for %s: %s", mb_id, exc, exc_info=True)
-            ext_errors.append(
-                Error(code="adapter_error", message=f"Adapter error fetching delivery for {mb_id}: {exc}")
-            )
-            continue
-
-        deliveries.append(
-            MediaBuyDeliveryData(
-                media_buy_id=mb_id,
-                buyer_ref=getattr(status_resp, "buyer_ref", None),
-                status=adapter_status,
-                pricing_model=PricingModel("cpm"),
-                totals=adapter_resp.totals,
-                by_package=[],
-            )
-        )
-        total_spend += float(adapter_resp.totals.spend or 0)
-        total_impressions += int(adapter_resp.totals.impressions or 0)
-
-    return GetMediaBuyDeliveryResponse(
-        reporting_period={"start": reporting_period.start, "end": reporting_period.end},
-        currency="USD",
-        aggregated_totals=AggregatedTotals(
-            impressions=float(total_impressions),
-            spend=total_spend,
-            clicks=None,
-            video_completions=None,
-            media_buy_count=len(deliveries),
-        ),
-        media_buy_deliveries=deliveries,
-        errors=ext_errors or None,
-        context=req.context,
-    )
-
-
 def _get_media_buy_delivery_impl(
     req: GetMediaBuyDeliveryRequest, identity: ResolvedIdentity | None
 ) -> GetMediaBuyDeliveryResponse:
@@ -288,9 +162,11 @@ def _get_media_buy_delivery_impl(
     reporting_period = MediaBuyReportingPeriod(start=start_dt, end=end_dt)
 
     # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
-    # These adapters bypass Postgres entirely -- call adapter.get_media_buy_delivery() directly.
+    # Tool-shaped logic lives on the adapter; core just dispatches.
     if adapter_manages_own_persistence(tenant):
-        return _adapter_managed_delivery(adapter, req, reporting_period)
+        from src.adapters.curation.adapter import CurationAdapter
+
+        return cast(CurationAdapter, adapter).get_delivery_for_tool(req, reporting_period)
 
     # Determine reference date for status calculations use end_date, it either will be today or the user provided end_date.
     reference_date = end_dt.date()
@@ -589,7 +465,6 @@ def _get_media_buy_delivery_impl(
 
                 # Cast status to match Literal type requirement
                 from typing import Literal as LiteralType
-                from typing import cast
 
                 status_typed = cast(
                     LiteralType["ready", "active", "paused", "completed", "failed", "reporting_delayed"], status
