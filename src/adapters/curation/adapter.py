@@ -28,7 +28,7 @@ from src.adapters.curation.catalog_client import CatalogClient
 from src.adapters.curation.config import CurationConnectionConfig
 from src.adapters.curation.sales_client import SalesClient
 from src.adapters.curation.segment_converter import DEFAULT_PUBLISHER_DOMAIN, segments_to_products
-from src.core.exceptions import AdCPAdapterError
+from src.core.exceptions import AdCPAdapterError, AdCPValidationError
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     CheckMediaBuyStatusResponse,
@@ -554,8 +554,12 @@ class CurationAdapter(ToolProvider):
         date_range: ReportingPeriod,
         today: datetime,
     ) -> AdapterGetMediaBuyDeliveryResponse:
-        self._sales.get_sale(media_buy_id)
-
+        # NOTE: real delivery metrics (impressions/spend/clicks) come from the
+        # curation_measurement service which is not yet wired up — see
+        # salesagent-s1i. Until that integration lands we return a zero-valued
+        # response so callers always get a well-formed result. We intentionally
+        # do not call ``self._sales.get_sale`` here because nothing in the
+        # response depends on it — saving an HTTP round trip.
         return AdapterGetMediaBuyDeliveryResponse(
             media_buy_id=media_buy_id,
             reporting_period=date_range,
@@ -580,6 +584,17 @@ class CurationAdapter(ToolProvider):
         budget: int | None,
         today: datetime,
     ) -> UpdateMediaBuyResponse:
+        # The Curation Sales service has no per-segment update endpoint yet — a
+        # ``package_id``-scoped update would silently become a sale-wide update,
+        # which is wrong. Reject the call so the caller sees the limitation
+        # instead of getting unintended behaviour. Tracked alongside
+        # salesagent-rk6 (end-to-end update_media_buy testing).
+        if package_id is not None:
+            raise AdCPValidationError(
+                "Curation adapter does not support package-scoped update_media_buy yet; "
+                "omit package_id to update the whole sale."
+            )
+
         update_data: dict[str, Any] = {}
 
         if action == "pause":
@@ -764,9 +779,14 @@ class CurationAdapter(ToolProvider):
 
 
 def _extract_pricing(package_pricing_info: dict[str, dict] | None) -> dict[str, Any]:
-    """Extract pricing from the first package's pricing info."""
+    """Extract pricing from the first package's pricing info.
+
+    Falls back to ``floor_price=None`` when no package pricing is supplied so
+    that the Sales service receives an explicit "no floor" signal rather than
+    an arbitrary $0.50 CPM that has no relationship to the buyer's intent.
+    """
     if not package_pricing_info:
-        return {"currency": "USD", "floor_price": 0.5}
+        return {"currency": "USD", "floor_price": None, "fixed_price": None}
 
     first = next(iter(package_pricing_info.values()), {})
     return {
@@ -848,17 +868,10 @@ def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list
                         else (assets_raw.model_dump(mode="json") if hasattr(assets_raw, "model_dump") else {})
                     )
 
-                tag = (
-                    getattr(c, "tag", None)
-                    or getattr(c, "snippet", None)
-                    or assets_dict.get("snippet")
-                )
+                tag = getattr(c, "tag", None) or getattr(c, "snippet", None) or assets_dict.get("snippet")
                 if tag:
                     entry["tag"] = tag
-                snippet_type = (
-                    getattr(c, "snippet_type", None)
-                    or assets_dict.get("snippet_type")
-                )
+                snippet_type = getattr(c, "snippet_type", None) or assets_dict.get("snippet_type")
                 if snippet_type:
                     entry["snippet_type"] = snippet_type
                 status = getattr(c, "status", None)

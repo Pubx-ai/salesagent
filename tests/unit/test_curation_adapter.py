@@ -613,7 +613,10 @@ class TestHelperFunctions:
 
         result = _extract_pricing(None)
         assert result["currency"] == "USD"
-        assert result["floor_price"] == 0.5
+        # No package pricing → no implicit floor; downstream Sales service
+        # treats this as "no floor", which is the explicit signal we want.
+        assert result["floor_price"] is None
+        assert result["fixed_price"] is None
 
     def test_extract_pricing_from_info(self):
         from src.adapters.curation.adapter import _extract_pricing
