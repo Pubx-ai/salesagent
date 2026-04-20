@@ -174,7 +174,6 @@ def _build_forecast(estimation: dict[str, Any]) -> DeliveryForecast | None:
     if not avg_daily or not isinstance(avg_daily, (int, float)) or avg_daily <= 0:
         return None
 
-    total_7d = estimation.get("total_impressions_7d", 0)
     low = int(avg_daily * 0.7) if avg_daily else None
     high = int(avg_daily * 1.3) if avg_daily else None
 
@@ -222,7 +221,9 @@ def _build_price_guidance(
     if not avg_cpm or not isinstance(avg_cpm, (int, float)) or avg_cpm <= 0:
         return None
 
-    suggested = _round_currency(min(float(avg_cpm) * multiplier, max_suggested_cpm))
+    # Clamp to floor so we never advertise a recommended bid below the
+    # configured minimum the seller is willing to accept.
+    suggested = _round_currency(max(min(float(avg_cpm) * multiplier, max_suggested_cpm), floor_cpm))
     return PriceGuidance(floor=floor_cpm, recommended=suggested, p50=suggested)
 
 
@@ -299,8 +300,12 @@ def segment_to_product(
         max_suggested_cpm=pricing_max_suggested_cpm,
     )
 
+    # Keep ``pricing_option_id`` in the canonical ``{model}_{currency}_{type}``
+    # form so the shared media_buy round-trip validator accepts it. The segment
+    # identity is already carried via ``product_id`` (set to ``segment_id``
+    # below), so we do not need to embed it in the pricing option id.
     cpm = CpmPricingOption(
-        pricing_option_id=f"cpm_usd_auction_{segment_id}",
+        pricing_option_id="cpm_usd_auction",
         pricing_model="cpm",
         currency="USD",
         floor_price=floor_price,

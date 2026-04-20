@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from src.adapters.curation.http_client import CurationHttpClient
 
@@ -80,5 +81,11 @@ class CatalogClient(CurationHttpClient):
         return all_segments
 
     def fetch_segment_by_id(self, segment_id: str) -> dict[str, Any]:
-        """Fetch a single segment by its ID (the segment name, which is the PK)."""
-        return self._request("GET", f"/segments/{segment_id}")
+        """Fetch a single segment by its ID (the segment name, which is the PK).
+
+        ``segment_id`` is URL-encoded so names containing slashes, spaces, or
+        other reserved characters resolve to the correct path instead of
+        accidentally hitting a different endpoint or returning 404.
+        """
+        encoded = quote(segment_id, safe="")
+        return self._request("GET", f"/segments/{encoded}")

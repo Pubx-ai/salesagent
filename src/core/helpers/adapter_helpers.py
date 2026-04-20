@@ -53,6 +53,24 @@ from src.core.database.database_session import get_db_session
 from src.core.schemas import Principal
 
 
+def _coerce_adapter_type(ad_server_config: Any, default: str = "mock") -> str:
+    """Normalise the tenant ``ad_server`` field to a plain adapter-type string.
+
+    The field is stored either as a bare string (``"curation"``) or as a dict
+    (``{"adapter": "curation", ...}``) depending on tenant vintage. Both
+    callers of this value (``get_adapter`` and ``adapter_manages_own_persistence``)
+    must agree on the normalised form, otherwise dict-shaped tenants silently
+    fall through to the mock adapter while the helper still says "curation".
+    """
+    if isinstance(ad_server_config, dict):
+        value = ad_server_config.get("adapter") or default
+    elif isinstance(ad_server_config, str) and ad_server_config:
+        value = ad_server_config
+    else:
+        value = default
+    return value.lower()
+
+
 def get_adapter(
     principal: Principal, dry_run: bool = False, testing_context: Any = None, tenant: Any = None
 ) -> ToolProvider:
@@ -77,11 +95,12 @@ def get_adapter(
     # Extract tenant_id and ad_server from tenant (supports both ORM model and dict)
     if isinstance(tenant, dict):
         tenant_id = tenant["tenant_id"]
-        selected_adapter = tenant.get("ad_server", "mock")
+        raw_ad_server = tenant.get("ad_server", "mock")
     else:
         # ORM model (Tenant) — use attribute access
         tenant_id = tenant.tenant_id
-        selected_adapter = tenant.ad_server or "mock"
+        raw_ad_server = tenant.ad_server or "mock"
+    selected_adapter = _coerce_adapter_type(raw_ad_server)
     logger.info(f"[ADAPTER_SELECT] Initial selected_adapter from tenant.ad_server: {selected_adapter}")
 
     # Get adapter config via repository
@@ -100,7 +119,7 @@ def get_adapter(
             logger.info(f"[ADAPTER_SELECT] adapter_type from AdapterConfig: {adapter_type}")
             # Use adapter_type from AdapterConfig as the source of truth
             if adapter_type:
-                selected_adapter = adapter_type
+                selected_adapter = _coerce_adapter_type(adapter_type)
                 logger.info(f"[ADAPTER_SELECT] Using AdapterConfig.adapter_type: {selected_adapter}")
             if adapter_type == "mock":
                 adapter_config["dry_run"] = config_row.mock_dry_run or False
@@ -207,9 +226,11 @@ def adapter_manages_own_persistence(tenant: dict[str, Any]) -> bool:
 
     Uses the ADAPTER_REGISTRY class attribute to avoid instantiating
     the adapter (which would trigger DB calls and test side effects).
+    Normalises the ``ad_server`` field via ``_coerce_adapter_type`` so this
+    helper and ``get_adapter`` agree on the adapter selection regardless of
+    whether the field is stored as a string or a dict.
     """
-    ad_server_config = tenant.get("ad_server", {})
-    adapter_type = ad_server_config.get("adapter", "mock") if isinstance(ad_server_config, dict) else ad_server_config
+    adapter_type = _coerce_adapter_type(tenant.get("ad_server"))
     try:
         from src.adapters import ADAPTER_REGISTRY
 

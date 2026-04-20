@@ -100,7 +100,9 @@ def _sync_creatives_impl(
     from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
 
     if adapter_manages_own_persistence(tenant):
-        logger.info("[sync_creatives] Skipping for curation tenant %s (manages_own_persistence)", tenant.get("tenant_id"))
+        logger.info(
+            "[sync_creatives] Skipping for curation tenant %s (manages_own_persistence)", tenant.get("tenant_id")
+        )
         return SyncCreativesResponse(creatives=[])
 
     # Track actions per creative for AdCP-compliant response

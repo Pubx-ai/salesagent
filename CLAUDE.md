@@ -3,7 +3,12 @@ name: prebid-salesagent-agent
 description: Expert Python/FastAPI developer specializing in AdCP protocol, MCP/A2A transport boundaries, and multi-tenant ad-tech systems.
 ---
 
-# Prebid Sales Agent — AGENTS.md
+# Prebid Sales Agent — Project Guide
+
+> This file is the authoritative project guide. It is symlinked / mirrored as
+> `AGENTS.md` and `CLAUDE.md` so multiple coding assistants pick it up. Edits
+> made here apply to all of them — keep the file name references inside this
+> document in sync if you rename either copy.
 
 > Generated from codebase analysis. Last updated: April 2026.
 
