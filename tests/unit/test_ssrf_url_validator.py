@@ -17,13 +17,17 @@ class TestCheckUrlSsrf:
     """Core validator rejects private/internal targets."""
 
     def test_valid_public_https_url_accepted(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]
+        ):
             is_safe, error = check_url_ssrf("https://example.com/agent")
         assert is_safe is True
         assert error == ""
 
     def test_valid_public_http_url_accepted(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]
+        ):
             is_safe, error = check_url_ssrf("http://example.com/agent")
         assert is_safe is True
         assert error == ""
@@ -34,7 +38,9 @@ class TestCheckUrlSsrf:
         assert "blocked" in error.lower() or "private" in error.lower() or "loopback" in error.lower()
 
     def test_loopback_ip_rejected(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("127.0.0.1", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("127.0.0.1", 0))]
+        ):
             is_safe, error = check_url_ssrf("http://127.0.0.1:9999")
         assert is_safe is False
 
@@ -45,17 +51,23 @@ class TestCheckUrlSsrf:
         assert "10.0.0.0/8" in error or "private" in error.lower()
 
     def test_private_rfc1918_192168_rejected(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("192.168.1.1", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("192.168.1.1", 0))]
+        ):
             is_safe, error = check_url_ssrf("http://router.local")
         assert is_safe is False
 
     def test_private_rfc1918_172_rejected(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("172.16.0.1", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("172.16.0.1", 0))]
+        ):
             is_safe, error = check_url_ssrf("http://internal.corp")
         assert is_safe is False
 
     def test_link_local_169_254_rejected(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("169.254.169.254", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("169.254.169.254", 0))]
+        ):
             is_safe, error = check_url_ssrf("http://169.254.169.254/metadata")
         assert is_safe is False
 
@@ -88,20 +100,27 @@ class TestCheckUrlSsrf:
         assert is_safe is False
 
     def test_require_https_rejects_http(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]
+        ):
             is_safe, error = check_url_ssrf("http://example.com/agent", require_https=True)
         assert is_safe is False
         assert "https" in error.lower()
 
     def test_require_https_accepts_https(self):
-        with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]
+        ):
             is_safe, error = check_url_ssrf("https://example.com/agent", require_https=True)
         assert is_safe is True
 
     def test_unresolvable_hostname_rejected(self):
         import socket
 
-        with patch("src.core.security.url_validator.socket.getaddrinfo", side_effect=socket.gaierror("Name or service not known")):
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo",
+            side_effect=socket.gaierror("Name or service not known"),
+        ):
             is_safe, error = check_url_ssrf("http://this-hostname-does-not-exist.invalid")
         assert is_safe is False
         assert "resolve" in error.lower() or "cannot" in error.lower()
@@ -235,7 +254,9 @@ class TestSignalsAgentEndpointSSRFWiring:
             # Make session.add() and commit() no-ops
             mock_session.add = MagicMock()
             mock_session.commit = MagicMock()
-            with patch("src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]):
+            with patch(
+                "src.core.security.url_validator.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 0))]
+            ):
                 with patch.dict(os.environ, {"ADCP_AUTH_TEST_MODE": "true"}):
                     response = client.post(
                         "/tenant/default/signals-agents/add",
