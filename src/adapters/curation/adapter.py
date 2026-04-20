@@ -87,6 +87,38 @@ class CurationAdapter(ToolProvider):
     adapter_name = "curation"
     manages_own_persistence = True
 
+    @classmethod
+    def on_config_saved(cls, tenant_id: str) -> None:
+        """Seed ``tenant.product_ranking_prompt`` with the curation default.
+
+        Replaces the runtime fallback branch that used to live in
+        ``_get_products_impl``. Only seeds when the prompt is null or empty;
+        any non-empty value (including an operator's deliberate edit) is
+        preserved. Called from ``save_adapter_config`` after the adapter
+        config write commits.
+        """
+        from sqlalchemy import select
+
+        from src.adapters.curation.ranking import DEFAULT_CURATION_RANKING_PROMPT
+        from src.core.database.database_session import get_db_session
+        from src.core.database.models import Tenant
+
+        with get_db_session() as session:
+            tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
+            if tenant is None:
+                logger.info(
+                    "on_config_saved: no Tenant row for %s; skipping prompt seed",
+                    tenant_id,
+                )
+                return
+            if not tenant.product_ranking_prompt:
+                tenant.product_ranking_prompt = DEFAULT_CURATION_RANKING_PROMPT
+                session.commit()
+                logger.info(
+                    "Seeded default curation ranking prompt for tenant %s",
+                    tenant_id,
+                )
+
     default_channels = ["display"]
     default_delivery_measurement = {"provider": "curation"}
 

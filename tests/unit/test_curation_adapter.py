@@ -574,6 +574,92 @@ class TestCurationAdapterUpdateMediaBuy:
         assert result.status == "pending_activation"
 
 
+class TestCurationAdapterOnConfigSaved:
+    """Seeds tenant.product_ranking_prompt on first save; idempotent thereafter.
+
+    This replaces the runtime fallback branch that used to live in
+    _get_products_impl. By writing the default prompt to the tenant DB
+    column, the existing ranking machinery picks it up on the next
+    get_products call without any adapter-specific branches in core.
+    """
+
+    def test_seeds_default_prompt_when_tenant_prompt_is_null(self):
+        from unittest.mock import MagicMock, patch
+
+        from src.adapters.curation.adapter import CurationAdapter
+        from src.adapters.curation.ranking import DEFAULT_CURATION_RANKING_PROMPT
+
+        mock_tenant = MagicMock()
+        mock_tenant.product_ranking_prompt = None
+        mock_session = MagicMock()
+        mock_session.scalars.return_value.first.return_value = mock_tenant
+
+        with patch("src.core.database.database_session.get_db_session") as mock_get_session:
+            mock_get_session.return_value.__enter__.return_value = mock_session
+            mock_get_session.return_value.__exit__.return_value = False
+
+            CurationAdapter.on_config_saved("t-1")
+
+        assert mock_tenant.product_ranking_prompt == DEFAULT_CURATION_RANKING_PROMPT
+        mock_session.commit.assert_called_once()
+
+    def test_seeds_default_prompt_when_tenant_prompt_is_empty_string(self):
+        from unittest.mock import MagicMock, patch
+
+        from src.adapters.curation.adapter import CurationAdapter
+        from src.adapters.curation.ranking import DEFAULT_CURATION_RANKING_PROMPT
+
+        mock_tenant = MagicMock()
+        mock_tenant.product_ranking_prompt = ""  # empty string — seed it
+        mock_session = MagicMock()
+        mock_session.scalars.return_value.first.return_value = mock_tenant
+
+        with patch("src.core.database.database_session.get_db_session") as mock_get_session:
+            mock_get_session.return_value.__enter__.return_value = mock_session
+            mock_get_session.return_value.__exit__.return_value = False
+
+            CurationAdapter.on_config_saved("t-1")
+
+        assert mock_tenant.product_ranking_prompt == DEFAULT_CURATION_RANKING_PROMPT
+
+    def test_does_not_overwrite_existing_custom_prompt(self):
+        """If an operator configured their own prompt, don't clobber it."""
+        from unittest.mock import MagicMock, patch
+
+        from src.adapters.curation.adapter import CurationAdapter
+
+        mock_tenant = MagicMock()
+        mock_tenant.product_ranking_prompt = "My custom prompt for this tenant"
+        mock_session = MagicMock()
+        mock_session.scalars.return_value.first.return_value = mock_tenant
+
+        with patch("src.core.database.database_session.get_db_session") as mock_get_session:
+            mock_get_session.return_value.__enter__.return_value = mock_session
+            mock_get_session.return_value.__exit__.return_value = False
+
+            CurationAdapter.on_config_saved("t-1")
+
+        assert mock_tenant.product_ranking_prompt == "My custom prompt for this tenant"
+        mock_session.commit.assert_not_called()
+
+    def test_no_op_when_tenant_not_found(self):
+        """Unknown tenant is a no-op — don't raise, don't commit."""
+        from unittest.mock import MagicMock, patch
+
+        from src.adapters.curation.adapter import CurationAdapter
+
+        mock_session = MagicMock()
+        mock_session.scalars.return_value.first.return_value = None
+
+        with patch("src.core.database.database_session.get_db_session") as mock_get_session:
+            mock_get_session.return_value.__enter__.return_value = mock_session
+            mock_get_session.return_value.__exit__.return_value = False
+
+            CurationAdapter.on_config_saved("nonexistent")
+
+        mock_session.commit.assert_not_called()
+
+
 # ── Base Adapter Hooks Tests ───────────────────────────────────────────
 
 
