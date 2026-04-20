@@ -27,8 +27,21 @@ ADCP_STATUS_TO_SALE_STATUSES: dict[str, list[str]] = {
     "failed": ["failed", "rejected"],
 }
 
+# AdCP update_media_buy action strings → resulting AdCP status. Matches the
+# action vocabulary used by the media_buy_update tool and every other adapter
+# in this repo (GAM, Broadstreet, Kevel, Mock) — not the short "pause"/"resume"
+# names that were never emitted by the tool layer.
 ACTION_TO_ADCP_STATUS: dict[str, str] = {
-    "pause": "paused",
-    "resume": "active",
-    "cancel": "completed",
+    "pause_media_buy": "paused",
+    "resume_media_buy": "active",
+    "pause_package": "paused",
+    "resume_package": "active",
+}
+
+# Subset of ACTION_TO_ADCP_STATUS that maps to a curation-service sale status
+# update; "update" (budget-only) and package-scoped actions don't change
+# sale-level status.
+ACTION_TO_SALE_STATUS: dict[str, str] = {
+    "pause_media_buy": "paused",
+    "resume_media_buy": "active",
 }

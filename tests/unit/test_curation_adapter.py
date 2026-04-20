@@ -521,38 +521,57 @@ class TestCurationAdapterCheckStatus:
 
 
 class TestCurationAdapterUpdateMediaBuy:
-    def test_pause_maps_to_paused_status(self):
+    def test_pause_media_buy_maps_to_paused_status(self):
         adapter = _make_adapter()
         adapter._sales.update_sale = MagicMock(return_value={})
 
-        result = adapter.update_media_buy("sale-1", "buyer-1", "pause", None, None, datetime.now(UTC))
+        result = adapter.update_media_buy("sale-1", "buyer-1", "pause_media_buy", None, None, datetime.now(UTC))
 
         assert result.status == "paused"
         assert result.buyer_ref == "buyer-1"
         adapter._sales.update_sale.assert_called_once_with("sale-1", {"status": "paused"})
 
-    def test_resume_maps_to_active_status(self):
+    def test_resume_media_buy_maps_to_active_status(self):
         adapter = _make_adapter()
         adapter._sales.update_sale = MagicMock(return_value={})
 
-        result = adapter.update_media_buy("sale-1", "buyer-1", "resume", None, None, datetime.now(UTC))
+        result = adapter.update_media_buy("sale-1", "buyer-1", "resume_media_buy", None, None, datetime.now(UTC))
 
         assert result.status == "active"
-
-    def test_cancel_maps_to_completed_status(self):
-        adapter = _make_adapter()
-        adapter._sales.update_sale = MagicMock(return_value={})
-
-        result = adapter.update_media_buy("sale-1", "buyer-1", "cancel", None, None, datetime.now(UTC))
-
-        assert result.status == "completed"
+        adapter._sales.update_sale.assert_called_once_with("sale-1", {"status": "active"})
 
     def test_buyer_ref_is_forwarded(self):
         adapter = _make_adapter()
         adapter._sales.update_sale = MagicMock(return_value={})
 
-        result = adapter.update_media_buy("sale-1", "my-buyer-ref", "pause", None, None, datetime.now(UTC))
+        result = adapter.update_media_buy("sale-1", "my-buyer-ref", "pause_media_buy", None, None, datetime.now(UTC))
         assert result.buyer_ref == "my-buyer-ref"
+
+    def test_budget_only_update_reads_current_sale_status(self):
+        """action='update' with budget must not lie — response should mirror
+        the sale's actual status, not default to 'active'."""
+        adapter = _make_adapter()
+        adapter._sales.update_sale = MagicMock(return_value={})
+        adapter._sales.get_sale = MagicMock(return_value={"status": "paused"})
+
+        result = adapter.update_media_buy("sale-1", "buyer-1", "update", None, 5000, datetime.now(UTC))
+
+        assert result.status == "paused"
+        adapter._sales.update_sale.assert_called_once_with("sale-1", {"budget": 5000.0})
+        adapter._sales.get_sale.assert_called_once_with("sale-1")
+
+    def test_budget_only_update_tolerates_get_sale_failure(self):
+        """If the post-update GET fails, fall back to pending_activation rather
+        than crashing — the write already succeeded."""
+        from src.core.exceptions import AdCPAdapterError
+
+        adapter = _make_adapter()
+        adapter._sales.update_sale = MagicMock(return_value={})
+        adapter._sales.get_sale = MagicMock(side_effect=AdCPAdapterError("service down"))
+
+        result = adapter.update_media_buy("sale-1", "buyer-1", "update", None, 5000, datetime.now(UTC))
+
+        assert result.status == "pending_activation"
 
 
 # ── Base Adapter Hooks Tests ───────────────────────────────────────────
@@ -674,9 +693,26 @@ class TestStatusMapping:
     def test_action_to_adcp_status(self):
         from src.adapters.curation.status_mapping import ACTION_TO_ADCP_STATUS
 
-        assert ACTION_TO_ADCP_STATUS["pause"] == "paused"
-        assert ACTION_TO_ADCP_STATUS["resume"] == "active"
-        assert ACTION_TO_ADCP_STATUS["cancel"] == "completed"
+        # Keys MUST match the action strings emitted by media_buy_update
+        # (same vocabulary as GAM / Kevel / Broadstreet adapters). Earlier
+        # revisions used short names like "pause" / "resume" / "cancel" that
+        # were never actually passed by the tool layer, so the mapping was
+        # effectively dead.
+        assert ACTION_TO_ADCP_STATUS["pause_media_buy"] == "paused"
+        assert ACTION_TO_ADCP_STATUS["resume_media_buy"] == "active"
+        assert ACTION_TO_ADCP_STATUS["pause_package"] == "paused"
+        assert ACTION_TO_ADCP_STATUS["resume_package"] == "active"
+
+    def test_action_to_sale_status_excludes_budget_only(self):
+        from src.adapters.curation.status_mapping import ACTION_TO_SALE_STATUS
+
+        # Only campaign-level pause/resume trigger a sale-status PATCH.
+        # "update" (budget-only) and package-scoped actions must not show up
+        # here — they should leave the sale's status untouched.
+        assert "pause_media_buy" in ACTION_TO_SALE_STATUS
+        assert "resume_media_buy" in ACTION_TO_SALE_STATUS
+        assert "update" not in ACTION_TO_SALE_STATUS
+        assert "update_package_budget" not in ACTION_TO_SALE_STATUS
 
 
 # ── SalesClient.list_sales Tests ─────────────────────────────────────────

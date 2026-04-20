@@ -31,7 +31,11 @@ from src.adapters.curation.catalog_client import CatalogClient
 from src.adapters.curation.config import CurationConnectionConfig
 from src.adapters.curation.sales_client import SalesClient
 from src.adapters.curation.segment_converter import DEFAULT_PUBLISHER_DOMAIN, segments_to_products
-from src.adapters.curation.status_mapping import ACTION_TO_ADCP_STATUS, SALE_STATUS_TO_ADCP
+from src.adapters.curation.status_mapping import (
+    ACTION_TO_ADCP_STATUS,
+    ACTION_TO_SALE_STATUS,
+    SALE_STATUS_TO_ADCP,
+)
 from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError, AdCPValidationError
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
@@ -577,12 +581,9 @@ class CurationAdapter(ToolProvider):
 
         update_data: dict[str, Any] = {}
 
-        if action == "pause":
-            update_data["status"] = "paused"
-        elif action == "resume":
-            update_data["status"] = "active"
-        elif action == "cancel":
-            update_data["status"] = "canceled"
+        sale_status_change = ACTION_TO_SALE_STATUS.get(action)
+        if sale_status_change is not None:
+            update_data["status"] = sale_status_change
 
         if budget is not None:
             update_data["budget"] = float(budget)
@@ -590,7 +591,25 @@ class CurationAdapter(ToolProvider):
         if update_data:
             self._sales.update_sale(media_buy_id, update_data)
 
-        adcp_status = ACTION_TO_ADCP_STATUS.get(action, "active")
+        if action in ACTION_TO_ADCP_STATUS:
+            adcp_status = ACTION_TO_ADCP_STATUS[action]
+        else:
+            # Budget-only or unmapped action — never assume "active". Read the
+            # sale's actual state from the curation service so the response
+            # doesn't misreport paused/completed/failed buys. Falls back to
+            # pending_activation if the GET fails, matching the default shape
+            # elsewhere in this adapter.
+            try:
+                current_sale = self._sales.get_sale(media_buy_id)
+                adcp_status = SALE_STATUS_TO_ADCP.get(current_sale.get("status", ""), "pending_activation")
+            except (AdCPNotFoundError, AdCPAdapterError) as e:
+                logger.warning(
+                    "Could not read current status for sale %s after update: %s",
+                    media_buy_id,
+                    e,
+                )
+                adcp_status = "pending_activation"
+
         return UpdateMediaBuySuccess(
             media_buy_id=media_buy_id,
             buyer_ref=buyer_ref,

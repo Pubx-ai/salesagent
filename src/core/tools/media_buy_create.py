@@ -135,6 +135,12 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
     Used by adapters with manages_own_persistence=True that bypass Postgres.
     Passes through budget, format_ids, targeting_overlay, and creative_ids
     so the adapter can build rich sale payloads (e.g. campaign segments).
+
+    Inline ``package.creatives`` are intentionally NOT copied onto MediaPackage
+    — the curation adapter reads them directly from ``request.packages`` via
+    ``_build_creative_assignments`` so they still reach the Sales service. See
+    :func:`_validate_inline_creatives_for_external_adapter` for the fail-fast
+    check run before we get here.
     """
     from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
 
@@ -144,7 +150,6 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
         bid_price = getattr(pkg, "bid_price", None)
         budget = getattr(pkg, "budget", None)
         creative_ids = getattr(pkg, "creative_ids", None)
-        creatives = getattr(pkg, "creatives", None)
         targeting_overlay = getattr(pkg, "targeting_overlay", None)
 
         # Use format_ids from the request package if available, else default
@@ -170,6 +175,41 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
             )
         )
     return packages
+
+
+def _validate_inline_creatives_for_external_adapter(req: CreateMediaBuyRequest) -> None:
+    """Fail fast on malformed inline creatives before they reach the adapter.
+
+    The Postgres-backed path runs inline creatives through
+    ``process_and_upload_package_creatives``, which validates structure and
+    substitutes server-assigned IDs. The adapter-managed path (curation)
+    skips that preprocessing, so without a check here, malformed inline
+    creatives reach the external Sales service with empty ``creative_id`` and
+    no ``format_id``, producing junk assignments that are hard to trace back.
+
+    Required shape per inline creative:
+        - ``format_id`` must be present.
+        - Must have EITHER a ``creative_id`` (library reference) OR a
+          non-empty ``tag``/``snippet``/``assets.snippet`` (inline content).
+
+    Raises:
+        AdCPValidationError: The first malformed creative found; the message
+            points at the offending ``packages[i].creatives[j]`` coordinate so
+            the caller can fix the request.
+    """
+    for i, pkg in enumerate(req.packages or []):
+        inline = getattr(pkg, "creatives", None) or []
+        for j, c in enumerate(inline):
+            coord = f"packages[{i}].creatives[{j}]"
+            if not getattr(c, "format_id", None):
+                raise AdCPValidationError(f"{coord}.format_id is required for inline creatives on curation tenants")
+            assets = getattr(c, "assets", None)
+            assets_snippet = None
+            if assets is not None:
+                assets_snippet = assets.get("snippet") if isinstance(assets, dict) else getattr(assets, "snippet", None)
+            has_content = getattr(c, "tag", None) or getattr(c, "snippet", None) or assets_snippet
+            if not getattr(c, "creative_id", None) and not has_content:
+                raise AdCPValidationError(f"{coord} must carry either creative_id or inline tag/snippet content")
 
 
 def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime]:
@@ -1440,6 +1480,11 @@ async def _create_media_buy_impl(
             raise AdCPValidationError("CreateMediaBuyRequest.packages must contain at least one package")
         if not req.buyer_ref:
             raise AdCPValidationError("CreateMediaBuyRequest.buyer_ref is required")
+
+        # process_and_upload_package_creatives doesn't run on this path, so
+        # mirror its shape invariants here instead of letting malformed inline
+        # creatives hit the Sales service with blank creative_ids.
+        _validate_inline_creatives_for_external_adapter(req)
 
         try:
             ext_adapter = get_adapter(

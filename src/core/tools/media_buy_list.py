@@ -6,6 +6,7 @@ for monitoring and reporting workflows.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -276,7 +277,15 @@ async def get_media_buys(
         )
         # Read identity pre-resolved by MCPAuthMiddleware
         identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-        response = _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
+        # _get_media_buys_impl is sync and performs blocking I/O — SQLAlchemy
+        # queries on Postgres for normal tenants, and a sync httpx round trip
+        # via adapter.list_media_buys() for curation tenants. Offload to a
+        # thread so this coroutine yields the event loop while those calls are
+        # outstanding. Mirrors the pattern used for get_products /
+        # create_media_buy in commit a8b50ec9.
+        response = await asyncio.to_thread(
+            _get_media_buys_impl, req, identity=identity, include_snapshot=include_snapshot
+        )
         return ToolResult(content=str(response), structured_content=response)
     except ValidationError as e:
         raise ToolError(format_validation_error(e, context="get_media_buys request"))
