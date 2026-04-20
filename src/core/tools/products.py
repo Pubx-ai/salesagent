@@ -4,11 +4,13 @@ This module contains the get_products tool implementation following the MCP/A2A
 shared implementation pattern from CLAUDE.md.
 """
 
+import asyncio
 import logging
 import os
 import time
 from typing import Any, cast
 
+import httpx
 from adcp import FormatId, ProductFilters
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
@@ -846,11 +848,7 @@ async def _get_products_impl(
             #     chain. Curation tenants get a terminal adapter error so the
             #     outage is visible; non-curation tenants fall back to the
             #     unranked list (ranking is best-effort there).
-            import asyncio as _asyncio
-
-            import httpx as _httpx
-
-            is_transient = isinstance(e, _httpx.HTTPError | _asyncio.TimeoutError | TimeoutError)
+            is_transient = isinstance(e, httpx.HTTPError | asyncio.TimeoutError | TimeoutError)
             if adapter_manages_own_persistence(tenant):
                 from src.core.exceptions import AdCPAdapterError
 

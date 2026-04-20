@@ -236,7 +236,7 @@ def adapter_manages_own_persistence(tenant: dict[str, Any]) -> bool:
 
         adapter_class = ADAPTER_REGISTRY.get(adapter_type)
         if adapter_class is not None:
-            return getattr(adapter_class, "manages_own_persistence", False) is True
+            return bool(getattr(adapter_class, "manages_own_persistence", False))
     except Exception:
         pass
     return False

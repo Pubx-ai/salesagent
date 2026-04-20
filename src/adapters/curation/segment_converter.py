@@ -227,7 +227,7 @@ def _build_price_guidance(
     return PriceGuidance(floor=floor_cpm, recommended=suggested, p50=suggested)
 
 
-def _build_ext(segment: dict[str, Any]) -> dict[str, Any]:
+def _build_ext(segment: dict[str, Any]) -> dict[str, Any] | None:
     """Build the ext (extension) object with metadata for AI ranking and buyer context."""
     metadata = segment.get("metadata", {}) or {}
     estimation = metadata.get("estimation", {}) or {}
@@ -245,7 +245,7 @@ def _build_ext(segment: dict[str, Any]) -> dict[str, Any]:
     if unique_sites and isinstance(unique_sites, (int, float)) and unique_sites > 0:
         ext["unique_sites"] = int(unique_sites)
 
-    return ext or None  # type: ignore[return-value]
+    return ext or None
 
 
 def _is_viable_segment(segment: dict[str, Any]) -> bool:

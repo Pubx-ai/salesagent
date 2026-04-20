@@ -91,7 +91,7 @@ from src.core.database.models import MediaBuy
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
 from src.core.helpers import log_tool_activity
-from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.adapter_helpers import adapter_manages_own_persistence, get_adapter
 from src.core.helpers.creative_helpers import (
     _convert_creative_to_adapter_asset,
     extract_click_url,
@@ -913,9 +913,6 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             from src.core.database.models import Creative as CreativeModel
             from src.core.database.models import CreativeAssignment
 
-            # Import adapter helper here (used for both creative upload and order approval)
-            from src.core.helpers.adapter_helpers import get_adapter
-
             # Get all creative assignments for this media buy
             stmt_assignments = select(CreativeAssignment).filter_by(media_buy_id=media_buy_id)
             assignments = session.scalars(stmt_assignments).all()
@@ -1433,8 +1430,6 @@ async def _create_media_buy_impl(
     # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
     # These adapters bypass Postgres entirely -- no setup validation, no buyer_ref dedup,
     # no workflow steps, no ORM creation. The adapter handles the full lifecycle.
-    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
-
     manages_own_persistence = adapter_manages_own_persistence(tenant)
 
     if manages_own_persistence:

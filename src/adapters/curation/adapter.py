@@ -10,7 +10,9 @@ and SSP deal activations via external HTTP services.
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -223,8 +225,6 @@ class CurationAdapter(ToolProvider):
             sale_data = self._build_campaign_sale_data(request, packages, start_time, end_time, package_pricing_info)
 
         if logger.isEnabledFor(logging.DEBUG):
-            import json as _json
-
             logger.debug("Sale payload to send: %s", _json.dumps(sale_data, default=str))
         sale_resp = self._sales.create_sale(sale_data)
         sale_id = sale_resp.get("sale_id")
@@ -439,8 +439,6 @@ class CurationAdapter(ToolProvider):
         activation_id: str | None = None
 
         if self._mock_activation:
-            import uuid
-
             mock_id = f"mock-{uuid.uuid4().hex[:8]}"
             activation_id = mock_id
             logger.info("Mock activation for sale %s: id=%s", sale_id, mock_id)
