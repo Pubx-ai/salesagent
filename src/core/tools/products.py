@@ -844,16 +844,26 @@ async def _get_products_impl(
             # tests / observability rather than masked as a degraded ranking.
             raise
         except Exception as e:
-            # Catch the long tail of network/auth/parsing/SDK failures from the
-            # AI provider (httpx errors, JSONDecodeError, model errors, …) so a
-            # single hiccup doesn't crash the entire get_products call.
-            # Curation tenants depend on AI ranking — turn the failure into a
-            # typed adapter error so the caller can retry. Non-curation
-            # tenants log and fall back to the unranked list.
+            # Long tail of non-AdCP failures from the AI provider (network,
+            # auth, parsing, SDK, bad model output). Classify before surfacing:
+            #   - Network/timeout errors are transient → tell the client to retry.
+            #   - Everything else (bad model output, schema mismatch, …) is
+            #     terminal: retrying won't help and would re-burn the fallback
+            #     chain. Curation tenants get a terminal adapter error so the
+            #     outage is visible; non-curation tenants fall back to the
+            #     unranked list (ranking is best-effort there).
+            import asyncio as _asyncio
+
+            import httpx as _httpx
+
+            is_transient = isinstance(e, _httpx.HTTPError | _asyncio.TimeoutError | TimeoutError)
             if adapter_manages_own_persistence(tenant):
                 from src.core.exceptions import AdCPAdapterError
 
-                raise AdCPAdapterError(f"AI ranking failed for curation tenant: {e}") from e
+                raise AdCPAdapterError(
+                    f"AI ranking failed for curation tenant: {e}",
+                    recovery="transient" if is_transient else "terminal",
+                ) from e
             logger.warning("Failed to apply AI product ranking: %s. Returning unranked products.", e)
 
     # Annotate pricing options with adapter support (AdCP PR #88)

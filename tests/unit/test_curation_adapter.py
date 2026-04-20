@@ -468,7 +468,12 @@ class TestCurationAdapterCreateMediaBuy:
         adapter = _make_adapter()
 
         adapter._sales.create_sale = MagicMock(return_value={"sale_id": "sale-456"})
-        adapter._activation.create_activation = MagicMock(side_effect=Exception("Activation down"))
+        # CurationHttpClient._request translates httpx failures into
+        # AdCPAdapterError before they reach the adapter, so simulate that
+        # shape here instead of a bare Exception (which would indicate a bug).
+        from src.core.exceptions import AdCPAdapterError
+
+        adapter._activation.create_activation = MagicMock(side_effect=AdCPAdapterError("Activation down"))
 
         from src.core.schemas import CreateMediaBuyRequest, CreateMediaBuySuccess, MediaPackage
 
@@ -650,7 +655,7 @@ class TestHelperFunctions:
 
 class TestStatusMapping:
     def test_sale_status_to_adcp(self):
-        from src.adapters.curation.adapter import SALE_STATUS_TO_ADCP
+        from src.adapters.curation.status_mapping import SALE_STATUS_TO_ADCP
 
         assert SALE_STATUS_TO_ADCP["active"] == "active"
         assert SALE_STATUS_TO_ADCP["pending_activation"] == "pending_activation"
@@ -659,7 +664,7 @@ class TestStatusMapping:
         assert SALE_STATUS_TO_ADCP["failed"] == "failed"
 
     def test_sale_status_covers_all_states(self):
-        from src.adapters.curation.adapter import SALE_STATUS_TO_ADCP
+        from src.adapters.curation.status_mapping import SALE_STATUS_TO_ADCP
 
         assert "canceled" in SALE_STATUS_TO_ADCP
         assert "rejected" in SALE_STATUS_TO_ADCP
@@ -667,7 +672,7 @@ class TestStatusMapping:
         assert SALE_STATUS_TO_ADCP["rejected"] == "failed"
 
     def test_action_to_adcp_status(self):
-        from src.adapters.curation.adapter import ACTION_TO_ADCP_STATUS
+        from src.adapters.curation.status_mapping import ACTION_TO_ADCP_STATUS
 
         assert ACTION_TO_ADCP_STATUS["pause"] == "paused"
         assert ACTION_TO_ADCP_STATUS["resume"] == "active"
@@ -788,7 +793,7 @@ class TestAdcpToSaleStatusReverseMap:
     """Reverse mapping of AdCP MediaBuyStatus values to curation sale statuses."""
 
     def test_pending_activation_maps_to_both_pending_states(self):
-        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+        from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
 
         assert ADCP_STATUS_TO_SALE_STATUSES["pending_activation"] == [
             "pending_approval",
@@ -796,22 +801,22 @@ class TestAdcpToSaleStatusReverseMap:
         ]
 
     def test_active_maps_to_single_active(self):
-        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+        from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
 
         assert ADCP_STATUS_TO_SALE_STATUSES["active"] == ["active"]
 
     def test_completed_maps_to_completed_and_canceled(self):
-        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+        from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
 
         assert ADCP_STATUS_TO_SALE_STATUSES["completed"] == ["completed", "canceled"]
 
     def test_failed_maps_to_failed_and_rejected(self):
-        from src.adapters.curation.adapter import ADCP_STATUS_TO_SALE_STATUSES
+        from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
 
         assert ADCP_STATUS_TO_SALE_STATUSES["failed"] == ["failed", "rejected"]
 
     def test_reverse_map_covers_all_forward_mapping_values(self):
-        from src.adapters.curation.adapter import (
+        from src.adapters.curation.status_mapping import (
             ADCP_STATUS_TO_SALE_STATUSES,
             SALE_STATUS_TO_ADCP,
         )
@@ -1635,9 +1640,11 @@ class TestActivateSale:
         assert activation["status"] == "active"
 
     def test_activation_failure_returns_none(self):
-        """Exception from create_activation -> returns None, no update_sale call."""
+        """AdCPAdapterError from create_activation -> returns None, no update_sale call."""
+        from src.core.exceptions import AdCPAdapterError
+
         adapter = _make_adapter()
-        adapter._activation.create_activation = MagicMock(side_effect=Exception("Service down"))
+        adapter._activation.create_activation = MagicMock(side_effect=AdCPAdapterError("Service down"))
         adapter._sales.update_sale = MagicMock(return_value={})
 
         sale_data = {"dsps": []}

@@ -28,7 +28,8 @@ from src.adapters.curation.catalog_client import CatalogClient
 from src.adapters.curation.config import CurationConnectionConfig
 from src.adapters.curation.sales_client import SalesClient
 from src.adapters.curation.segment_converter import DEFAULT_PUBLISHER_DOMAIN, segments_to_products
-from src.core.exceptions import AdCPAdapterError, AdCPValidationError
+from src.adapters.curation.status_mapping import ACTION_TO_ADCP_STATUS, SALE_STATUS_TO_ADCP
+from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError, AdCPValidationError
 from src.core.schemas import (
     AdapterGetMediaBuyDeliveryResponse,
     CheckMediaBuyStatusResponse,
@@ -48,35 +49,6 @@ from src.core.schemas import (
 from src.core.schemas.product import Product
 
 logger = logging.getLogger(__name__)
-
-SALE_STATUS_TO_ADCP = {
-    "pending_approval": "pending_activation",
-    "pending_activation": "pending_activation",
-    "active": "active",
-    "paused": "paused",
-    "completed": "completed",
-    "failed": "failed",
-    "rejected": "failed",
-    "canceled": "completed",
-}
-
-# Inverse of SALE_STATUS_TO_ADCP. One AdCP status may map to multiple curation
-# statuses because the forward mapping is lossy (both `completed` and `canceled`
-# map to AdCP `completed`; both `failed` and `rejected` map to AdCP `failed`;
-# both `pending_approval` and `pending_activation` map to AdCP `pending_activation`).
-ADCP_STATUS_TO_SALE_STATUSES: dict[str, list[str]] = {
-    "pending_activation": ["pending_approval", "pending_activation"],
-    "active": ["active"],
-    "paused": ["paused"],
-    "completed": ["completed", "canceled"],
-    "failed": ["failed", "rejected"],
-}
-
-ACTION_TO_ADCP_STATUS = {
-    "pause": "paused",
-    "resume": "active",
-    "cancel": "completed",
-}
 
 
 @dataclass
@@ -294,15 +266,21 @@ class CurationAdapter(ToolProvider):
             if pid:
                 req_pkg_by_product[pid] = req_pkg
 
-        # Fetch catalog metadata per segment for domains enrichment
+        # Per-segment catalog lookup for domain enrichment; tolerate misses so a
+        # single 404/outage doesn't block the sale, but only swallow the curation
+        # adapter's own typed errors — real bugs should propagate.
         catalog_by_id: dict[str, dict[str, Any]] = {}
         for pkg in packages:
             if pkg.product_id and pkg.product_id not in catalog_by_id:
                 try:
                     seg_data = self._catalog.fetch_segment_by_id(pkg.product_id)
                     catalog_by_id[pkg.product_id] = seg_data
-                except Exception:
-                    logger.warning("Could not fetch catalog segment %s for domain enrichment", pkg.product_id)
+                except (AdCPNotFoundError, AdCPAdapterError) as e:
+                    logger.warning(
+                        "Could not fetch catalog segment %s for domain enrichment: %s",
+                        pkg.product_id,
+                        e,
+                    )
 
         segments: list[dict[str, Any]] = []
         for pkg in packages:
@@ -518,17 +496,16 @@ class CurationAdapter(ToolProvider):
                         "status": act_resp.get("status", "active"),
                     }
                 logger.info("Activation created for sale %s: %s", sale_id, activation_id)
-            except Exception:
+            except AdCPAdapterError:
                 logger.exception("Activation failed for sale %s", sale_id)
                 return None
 
-        # Update sale with activation record
         try:
             self._sales.update_sale(
                 sale_id,
                 {"status": "active", "activations": [activation_record]},
             )
-        except Exception:
+        except AdCPAdapterError:
             logger.warning("Failed to update sale %s after activation", sale_id, exc_info=True)
 
         return activation_id
