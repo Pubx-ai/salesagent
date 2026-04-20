@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from src.core.schemas import (
         GetMediaBuyDeliveryRequest,
         GetMediaBuyDeliveryResponse,
+        GetMediaBuysRequest,
+        GetMediaBuysResponse,
     )
     from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
 
@@ -748,6 +750,80 @@ class CurationAdapter(ToolProvider):
             ),
             media_buy_deliveries=deliveries,
             errors=ext_errors or None,
+            context=req.context,
+        )
+
+    def get_media_buys_for_tool(
+        self,
+        req: GetMediaBuysRequest,
+        include_snapshot: bool,
+    ) -> GetMediaBuysResponse:
+        """Tool-shaped list entry for media_buy_list.
+
+        Translates the AdCP ``status_filter`` to curation sale statuses,
+        delegates to ``self.list_media_buys()``, wraps the result in a
+        ``GetMediaBuysResponse``. Appends a soft ``results_truncated``
+        error entry when the adapter hit its safety cap.
+
+        Replaces the inline ``_get_media_buys_impl_curation`` helper that
+        used to live in ``src/core/tools/media_buy_list.py``.
+        """
+        from pydantic import RootModel
+
+        from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
+        from src.core.schemas import GetMediaBuysResponse, SnapshotUnavailableReason
+
+        # Resolve AdCP status_filter to a set of MediaBuyStatus values.
+        status_filter = req.status_filter
+        if status_filter is None:
+            adcp_statuses: set[MediaBuyStatus] = {MediaBuyStatus.active}
+        elif isinstance(status_filter, RootModel):
+            adcp_statuses = set(status_filter.root)
+        elif isinstance(status_filter, list):
+            adcp_statuses = set(status_filter)
+        else:
+            adcp_statuses = {status_filter}
+
+        sale_statuses: list[str] = []
+        for adcp_status in adcp_statuses:
+            sale_statuses.extend(ADCP_STATUS_TO_SALE_STATUSES.get(adcp_status.value, []))
+
+        result = self.list_media_buys(
+            sale_ids=req.media_buy_ids,
+            buyer_refs=req.buyer_refs,
+            statuses=sale_statuses or None,
+        )
+
+        errors: list[dict] = []
+        if result.truncated:
+            cap = getattr(self, "_max_media_buys_per_list", 500)
+            errors.append(
+                {
+                    "code": "results_truncated",
+                    "message": (
+                        f"Result set exceeded cap of {cap}; "
+                        f"{result.total_fetched} media buys returned. "
+                        f"Narrow filters to see more."
+                    ),
+                }
+            )
+            logger.warning(
+                "Curation get_media_buys truncated at cap=%d (total_fetched=%d)",
+                cap,
+                result.total_fetched,
+            )
+
+        # CurationAdapter does not support realtime reporting; when the caller
+        # requested snapshots, mark every package as unsupported so clients see
+        # the signal instead of silent None.
+        if include_snapshot:
+            for mb in result.media_buys:
+                for pkg in mb.packages:
+                    pkg.snapshot_unavailable_reason = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
+
+        return GetMediaBuysResponse(
+            media_buys=result.media_buys,
+            errors=errors or None,
             context=req.context,
         )
 

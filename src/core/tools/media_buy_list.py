@@ -58,11 +58,10 @@ class _PackageData:
 from adcp.types.generated_poc.core.context import ContextObject
 from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
 
-from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
 from src.core.auth import get_principal_object
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError, AdCPValidationError
 from src.core.helpers.adapter_helpers import adapter_manages_own_persistence, get_adapter
 from src.core.schemas import (
     ApprovalStatus,
@@ -122,11 +121,8 @@ def _get_media_buys_impl(
     today = datetime.now(UTC).date()
     tenant_id: str = tenant["tenant_id"]
 
-    # ── Curation tenant early return ──────────────────────────────────
     # Adapters with manages_own_persistence=True bypass Postgres entirely.
-    # We delegate the listing to adapter.list_media_buys() and wrap the
-    # result in GetMediaBuysResponse. This path is used by CurationAdapter,
-    # which stores media buys as sales in the external curation_sales service.
+    # Tool-shaped logic lives on the adapter; core just dispatches.
     if adapter_manages_own_persistence(tenant):
         adapter = get_adapter(
             principal,
@@ -134,12 +130,14 @@ def _get_media_buys_impl(
             testing_context=testing_ctx,
             tenant=tenant,
         )
-        return _get_media_buys_impl_curation(
-            req=req,
-            adapter=adapter,
-            include_snapshot=include_snapshot,
-        )
-    # ── End curation early return ─────────────────────────────────────
+        from src.adapters.curation.adapter import CurationAdapter
+
+        if not isinstance(adapter, CurationAdapter):
+            raise AdCPAdapterError(
+                f"Adapter {type(adapter).__name__} declares manages_own_persistence=True "
+                f"but does not subclass CurationAdapter; cannot dispatch get_media_buys"
+            )
+        return adapter.get_media_buys_for_tool(req, include_snapshot=include_snapshot)
 
     # Single DB session for all reads — ORM objects are converted to plain
     # dataclasses inside the UoW scope so nothing is accessed after session close.
@@ -479,61 +477,3 @@ def _map_creative_status(status: str) -> ApprovalStatus:
     if status == "rejected":
         return ApprovalStatus.rejected
     return ApprovalStatus.pending_review
-
-
-def _get_media_buys_impl_curation(
-    *,
-    req: GetMediaBuysRequest,
-    adapter: Any,
-    include_snapshot: bool,
-) -> GetMediaBuysResponse:
-    """Curation-tenant path: delegate to adapter.list_media_buys().
-
-    Translates AdCP filters to curation filters, calls the adapter, wraps
-    the result in a GetMediaBuysResponse, and appends a soft truncation
-    error entry if the adapter hit its safety cap.
-    """
-    # Translate AdCP status_filter → curation sale statuses (lossy inverse)
-    adcp_statuses = _resolve_status_filter(req.status_filter)
-    sale_statuses: list[str] = []
-    for adcp_status in adcp_statuses:
-        sale_statuses.extend(ADCP_STATUS_TO_SALE_STATUSES.get(adcp_status.value, []))
-
-    result = adapter.list_media_buys(
-        sale_ids=req.media_buy_ids,
-        buyer_refs=req.buyer_refs,
-        statuses=sale_statuses or None,
-    )
-
-    errors: list[Any] = []
-    if result.truncated:
-        cap = getattr(adapter, "_max_media_buys_per_list", 500)
-        errors.append(
-            {
-                "code": "results_truncated",
-                "message": (
-                    f"Result set exceeded cap of {cap}; "
-                    f"{result.total_fetched} media buys returned. "
-                    f"Narrow filters to see more."
-                ),
-            }
-        )
-        logger.warning(
-            "Curation get_media_buys truncated at cap=%d (total_fetched=%d)",
-            cap,
-            result.total_fetched,
-        )
-
-    # CurationAdapter does not support realtime reporting; when the caller
-    # requested snapshots, mark every package as unsupported so clients see
-    # the signal instead of silent None.
-    if include_snapshot:
-        for mb in result.media_buys:
-            for pkg in mb.packages:
-                pkg.snapshot_unavailable_reason = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
-
-    return GetMediaBuysResponse(
-        media_buys=result.media_buys,
-        errors=errors or None,
-        context=req.context,
-    )

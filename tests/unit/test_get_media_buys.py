@@ -495,12 +495,32 @@ class TestGetMediaBuysRequestRejectsInternalFlags:
 
 class TestGetMediaBuysCurationEarlyReturn:
     """When adapter_manages_own_persistence is True, _impl delegates to
-    adapter.list_media_buys() instead of querying Postgres."""
+    adapter.get_media_buys_for_tool() instead of querying Postgres.
+
+    Dispatch requires isinstance(adapter, CurationAdapter), so these tests
+    stub a real CurationAdapter (cheap to construct -- no network calls at
+    init) and override list_media_buys to assert the translation that
+    get_media_buys_for_tool performs.
+    """
 
     def _make_identity(self):
         from tests.factories import PrincipalFactory
 
         return PrincipalFactory.make_identity(tenant_id="t-curation", principal_id="p1")
+
+    def _make_curation_adapter(self):
+        """Build a real CurationAdapter so isinstance check passes."""
+        from src.adapters.curation.adapter import CurationAdapter
+
+        principal = MagicMock()
+        principal.principal_id = "p1"
+        principal.get_adapter_id = MagicMock(return_value="curation-id")
+        config = {
+            "catalog_service_url": "http://catalog:8000",
+            "sales_service_url": "http://sales:8001",
+            "activation_service_url": "http://activation:8002",
+        }
+        return CurationAdapter(config, principal, dry_run=False, tenant_id="t-curation")
 
     def _make_result(self, count: int = 0, truncated: bool = False):
         from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
@@ -534,9 +554,8 @@ class TestGetMediaBuysCurationEarlyReturn:
 
         identity = self._make_identity()
 
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result(count=2)
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result(count=2))
 
         with (
             patch(
@@ -571,9 +590,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -602,9 +620,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -632,9 +649,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -664,9 +680,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -695,9 +710,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -733,9 +747,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()  # tenant_id="t-curation"
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -773,9 +786,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()  # tenant_id="t-curation"
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result()
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
 
         with (
             patch(
@@ -807,9 +819,8 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = self._make_result(count=500, truncated=True)
-        mock_adapter._max_media_buys_per_list = 500
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result(count=500, truncated=True))
 
         with (
             patch(
@@ -848,39 +859,40 @@ class TestGetMediaBuysCurationEarlyReturn:
         from src.core.tools.media_buy_list import _get_media_buys_impl
 
         identity = self._make_identity()
-        mock_adapter = MagicMock()
-        mock_adapter.list_media_buys.return_value = ListMediaBuysResult(
-            media_buys=[
-                GetMediaBuysMediaBuy(
-                    media_buy_id="s1",
-                    buyer_ref="b",
-                    buyer_campaign_ref=None,
-                    status=MediaBuyStatus.active,
-                    currency="USD",
-                    total_budget=0.0,
-                    packages=[
-                        GetMediaBuysPackage(
-                            package_id="seg1",
-                            buyer_ref="b",
-                            budget=None,
-                            bid_price=None,
-                            product_id="seg1",
-                            start_time=None,
-                            end_time=None,
-                            paused=None,
-                            creative_approvals=None,
-                            snapshot=None,
-                            snapshot_unavailable_reason=None,
-                        )
-                    ],
-                    created_at=None,
-                    updated_at=None,
-                )
-            ],
-            truncated=False,
-            total_fetched=1,
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(
+            return_value=ListMediaBuysResult(
+                media_buys=[
+                    GetMediaBuysMediaBuy(
+                        media_buy_id="s1",
+                        buyer_ref="b",
+                        buyer_campaign_ref=None,
+                        status=MediaBuyStatus.active,
+                        currency="USD",
+                        total_budget=0.0,
+                        packages=[
+                            GetMediaBuysPackage(
+                                package_id="seg1",
+                                buyer_ref="b",
+                                budget=None,
+                                bid_price=None,
+                                product_id="seg1",
+                                start_time=None,
+                                end_time=None,
+                                paused=None,
+                                creative_approvals=None,
+                                snapshot=None,
+                                snapshot_unavailable_reason=None,
+                            )
+                        ],
+                        created_at=None,
+                        updated_at=None,
+                    )
+                ],
+                truncated=False,
+                total_fetched=1,
+            )
         )
-        mock_adapter._max_media_buys_per_list = 500
 
         with (
             patch(

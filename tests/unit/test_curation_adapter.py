@@ -2056,3 +2056,79 @@ class TestCurationAdapterGetDeliveryForTool:
 
         assert result.errors is not None
         assert any(e.code == "media_buy_not_found" for e in result.errors)
+
+
+class TestCurationAdapterGetMediaBuysForTool:
+    """Tool-shaped list entry: accepts GetMediaBuysRequest, applies AdCP
+    status_filter translation, wraps the adapter's list_media_buys() result
+    in GetMediaBuysResponse. Replaces the inline _get_media_buys_impl_curation
+    helper that used to live in src/core/tools/media_buy_list.py."""
+
+    def test_translates_adcp_status_filter_to_sale_statuses(self):
+        from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
+        from src.adapters.curation.adapter import ListMediaBuysResult
+        from src.core.schemas import GetMediaBuysRequest
+
+        adapter = _make_adapter()
+        captured: dict = {}
+
+        def fake_list(*, sale_ids=None, buyer_refs=None, statuses=None):
+            captured["statuses"] = statuses
+            return ListMediaBuysResult(media_buys=[], truncated=False, total_fetched=0)
+
+        adapter.list_media_buys = fake_list
+
+        req = GetMediaBuysRequest(
+            media_buy_ids=None,
+            buyer_refs=None,
+            status_filter=MediaBuyStatus.paused,
+        )
+        adapter.get_media_buys_for_tool(req, include_snapshot=False)
+
+        # AdCP 'paused' maps to curation sale status 'paused' (same name)
+        assert captured["statuses"] == ["paused"]
+
+    def test_wraps_result_with_truncation_soft_error(self):
+        from unittest.mock import MagicMock
+
+        from src.adapters.curation.adapter import ListMediaBuysResult
+        from src.core.schemas import GetMediaBuysMediaBuy, GetMediaBuysRequest
+
+        adapter = _make_adapter()
+        buy = MagicMock(spec=GetMediaBuysMediaBuy)
+        buy.packages = []
+        adapter.list_media_buys = MagicMock(
+            return_value=ListMediaBuysResult(media_buys=[buy], truncated=True, total_fetched=500)
+        )
+
+        req = GetMediaBuysRequest(media_buy_ids=None, buyer_refs=None)
+        resp = adapter.get_media_buys_for_tool(req, include_snapshot=False)
+
+        assert resp.errors is not None
+        assert any((e.get("code") if isinstance(e, dict) else e.code) == "results_truncated" for e in resp.errors)
+
+    def test_flags_snapshot_unsupported_when_requested(self):
+        from unittest.mock import MagicMock
+
+        from src.adapters.curation.adapter import ListMediaBuysResult
+        from src.core.schemas import (
+            GetMediaBuysMediaBuy,
+            GetMediaBuysPackage,
+            GetMediaBuysRequest,
+            SnapshotUnavailableReason,
+        )
+
+        adapter = _make_adapter()
+        pkg = MagicMock(spec=GetMediaBuysPackage)
+        pkg.snapshot_unavailable_reason = None
+        buy = MagicMock(spec=GetMediaBuysMediaBuy)
+        buy.packages = [pkg]
+        adapter.list_media_buys = MagicMock(
+            return_value=ListMediaBuysResult(media_buys=[buy], truncated=False, total_fetched=1)
+        )
+
+        req = GetMediaBuysRequest(media_buy_ids=None, buyer_refs=None)
+        adapter.get_media_buys_for_tool(req, include_snapshot=True)
+
+        assert pkg.snapshot_unavailable_reason == SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
