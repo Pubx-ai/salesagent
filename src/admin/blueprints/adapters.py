@@ -202,6 +202,21 @@ def save_adapter_config(tenant_id, **kwargs):
             session.commit()
             logger.info(f"Saved adapter config for tenant {tenant_id}: {adapter_type}")
 
+        # Fire the adapter's post-save hook. Curation uses this to seed
+        # tenant.product_ranking_prompt; other adapters inherit a no-op base.
+        from src.adapters import ADAPTER_REGISTRY
+
+        adapter_class = ADAPTER_REGISTRY.get(adapter_type)
+        if adapter_class is not None:
+            try:
+                adapter_class.on_config_saved(tenant_id)
+            except Exception:
+                logger.exception(
+                    "on_config_saved hook failed for adapter_type=%s tenant_id=%s",
+                    adapter_type,
+                    tenant_id,
+                )
+
         return jsonify({"success": True, "adapter_type": adapter_type})
 
     except Exception as e:
