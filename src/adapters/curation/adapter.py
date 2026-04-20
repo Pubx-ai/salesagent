@@ -598,6 +598,17 @@ class CurationAdapter(ToolProvider):
         {"pending_activation", "pending_creative", "pending_manual", "scheduled", "active", "paused"}
     )
 
+    # Translate AdCP status vocabulary to the internal Literal the
+    # MediaBuyDeliveryData.status field accepts. FIXME(salesagent-jz3y):
+    # align these terms when _compute_media_buy_status is updated;
+    # src/core/schemas/delivery.py has a matching FIXME.
+    _ADCP_TO_INTERNAL_STATUS: dict[str, str] = {
+        "pending_activation": "ready",
+        "pending_creative": "ready",
+        "pending_manual": "ready",
+        "scheduled": "ready",
+    }
+
     def get_delivery_for_tool(
         self,
         req: GetMediaBuyDeliveryRequest,
@@ -626,20 +637,6 @@ class CurationAdapter(ToolProvider):
             MediaBuyDeliveryData,
             PricingModel,
         )
-
-        # FIXME(salesagent-jz3y): MediaBuyDeliveryData.status uses internal statuses
-        # (ready/active/...) whereas CheckMediaBuyStatusResponse yields AdCP statuses
-        # (pending_activation/...). Map AdCP → internal at the schema boundary so the
-        # response validates; align terminology when the FIXME in delivery.py lands.
-        _ADCP_TO_INTERNAL_STATUS: dict[str, str] = {
-            "pending_activation": "ready",
-            "pending_creative": "ready",
-            "pending_manual": "ready",
-            "scheduled": "ready",
-        }
-
-        def _to_internal_status(adcp_status: str) -> str:
-            return _ADCP_TO_INTERNAL_STATUS.get(adcp_status, adcp_status)
 
         requested_ids: list[str] = list(req.media_buy_ids or [])
         buyer_refs: list[str] = list(req.buyer_refs or [])
@@ -710,7 +707,7 @@ class CurationAdapter(ToolProvider):
                         MediaBuyDeliveryData(
                             media_buy_id=mb_id,
                             buyer_ref=getattr(status_resp, "buyer_ref", None),
-                            status=_to_internal_status(adapter_status),
+                            status=self._ADCP_TO_INTERNAL_STATUS.get(adapter_status, adapter_status),
                             pricing_model=PricingModel("cpm"),
                             totals=DeliveryTotals(impressions=0.0, spend=0.0, clicks=None, video_completions=None),
                             by_package=[],
@@ -730,7 +727,7 @@ class CurationAdapter(ToolProvider):
                 MediaBuyDeliveryData(
                     media_buy_id=mb_id,
                     buyer_ref=getattr(status_resp, "buyer_ref", None),
-                    status=_to_internal_status(adapter_status),
+                    status=self._ADCP_TO_INTERNAL_STATUS.get(adapter_status, adapter_status),
                     pricing_model=PricingModel("cpm"),
                     totals=adapter_resp.totals,
                     by_package=[],

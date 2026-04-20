@@ -18,7 +18,7 @@ from fastmcp.tools.tool import ToolResult
 from pydantic import RootModel, ValidationError
 from rich.console import Console
 
-from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError, AdCPValidationError
 from src.core.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,12 @@ def _get_media_buy_delivery_impl(
     if adapter_manages_own_persistence(tenant):
         from src.adapters.curation.adapter import CurationAdapter
 
-        return cast(CurationAdapter, adapter).get_delivery_for_tool(req, reporting_period)
+        if not isinstance(adapter, CurationAdapter):
+            raise AdCPAdapterError(
+                f"Adapter {type(adapter).__name__} declares manages_own_persistence=True "
+                f"but does not subclass CurationAdapter; cannot dispatch delivery"
+            )
+        return adapter.get_delivery_for_tool(req, reporting_period)
 
     # Determine reference date for status calculations use end_date, it either will be today or the user provided end_date.
     reference_date = end_dt.date()
