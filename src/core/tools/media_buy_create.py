@@ -8,6 +8,7 @@ Handles media buy creation including:
 - Budget validation
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -1448,7 +1449,13 @@ async def _create_media_buy_impl(
             start_time, end_time = _parse_request_times(req)
             pkg_pricing = _build_package_pricing_info(req)
 
-            response = ext_adapter.create_media_buy(req, ext_packages, start_time, end_time, pkg_pricing)
+            # `create_media_buy` on ToolProvider-only adapters (curation) runs
+            # a synchronous `httpx.Client.post(...)` against an external service.
+            # Offload to a thread so this coroutine yields the event loop while
+            # the sales/activation round trips are outstanding.
+            response = await asyncio.to_thread(
+                ext_adapter.create_media_buy, req, ext_packages, start_time, end_time, pkg_pricing
+            )
             status = (
                 AdcpTaskStatus.completed.value
                 if isinstance(response, CreateMediaBuySuccess)

@@ -347,7 +347,12 @@ async def _get_products_impl(
 
         try:
             adapter_instance = get_adapter(principal, dry_run=True, tenant=tenant)
-            adapter_products = adapter_instance.get_product_catalog(tenant["tenant_id"])
+            # `get_product_catalog` issues synchronous `httpx.Client` requests
+            # (curation adapter) that would otherwise block the asyncio event
+            # loop for the duration of the round trip. Offloading to a worker
+            # thread keeps other coroutines scheduled while we wait on I/O
+            # without forcing every adapter to expose an async variant.
+            adapter_products = await asyncio.to_thread(adapter_instance.get_product_catalog, tenant["tenant_id"])
         except AdCPError:
             # Surface typed AdCP errors as-is (e.g. validation, not-found).
             raise
