@@ -296,6 +296,20 @@ class ToolProvider(ABC):
         """Get near-real-time delivery snapshots for packages."""
         raise NotImplementedError("Snapshots not supported by this provider")
 
+    @classmethod
+    def on_config_saved(cls, tenant_id: str) -> None:
+        """Hook called after an operator saves this adapter's config for a tenant.
+
+        Override in subclasses that need post-save provisioning (e.g. seeding
+        a default ranking prompt, creating external resources). Base
+        implementation is a no-op so existing adapters need no changes.
+
+        Called from ``src/admin/blueprints/adapters.py::save_adapter_config``
+        after ``session.commit()`` on the AdapterConfig write. Idempotency is
+        the overrider's responsibility.
+        """
+        return None
+
 
 class AdServerAdapter(ToolProvider):
     """Abstract base class for ad server adapters.
