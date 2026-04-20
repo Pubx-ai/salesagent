@@ -275,7 +275,12 @@ function testCurationConnection() {
         }
     })
     .catch(error => {
-        statusEl.innerHTML = '<span style="color: #ef4444;">\u2717 Error: ' + error.message + '</span>';
+        statusEl.textContent = '';
+        const errSpan = document.createElement('span');
+        errSpan.style.color = '#ef4444';
+        const message = (error && error.message) ? error.message : 'Connection failed';
+        errSpan.appendChild(document.createTextNode('\u2717 Error: ' + message));
+        statusEl.appendChild(errSpan);
     });
 }
 </script>

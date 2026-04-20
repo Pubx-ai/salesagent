@@ -1,6 +1,9 @@
 """Adapters management blueprint."""
 
+import ipaddress
 import logging
+import socket
+from urllib.parse import urlparse
 
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 from pydantic import ValidationError
@@ -14,6 +17,51 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import AdapterConfig, Product
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_external_url(url: str, *, label: str) -> str | None:
+    """Validate a user-supplied URL is safe to fetch from a server-side admin endpoint.
+
+    Returns an error message string if the URL is unsafe, or None if it's acceptable.
+    Blocks non-http(s) schemes, hostnames that resolve to private/loopback/link-local
+    addresses, and bare IP literals targeting metadata/internal ranges. This guards
+    the admin connection-test endpoint against SSRF.
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, TypeError):
+        return f"{label}: invalid URL"
+
+    if parsed.scheme not in {"http", "https"}:
+        return f"{label}: only http(s) URLs are allowed"
+
+    host = parsed.hostname
+    if not host:
+        return f"{label}: missing hostname"
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return f"{label}: hostname could not be resolved"
+
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return f"{label}: hostname resolves to a non-routable address"
+
+    return None
+
 
 # Create blueprint
 adapters_bp = Blueprint("adapters", __name__)
@@ -323,41 +371,63 @@ def test_curation_connection(tenant_id, **kwargs):
         if not catalog_url:
             return jsonify({"success": False, "error": "catalog_service_url is required"}), 400
 
+        for url, label in (
+            (catalog_url, "catalog_service_url"),
+            (sales_url, "sales_service_url"),
+            (activation_url, "activation_service_url"),
+        ):
+            if not url:
+                continue
+            err = _validate_external_url(url, label=label)
+            if err:
+                logger.warning(
+                    "Curation connection test rejected for tenant_id=%s: %s",
+                    tenant_id,
+                    err,
+                )
+                return jsonify({"success": False, "error": err}), 400
+
         import httpx
 
         results: dict = {}
         segment_count: int | None = None
 
-        # Test catalog
+        # All three health checks share the same success criterion: any
+        # response with status < 500 means we successfully reached the
+        # service. 4xx (e.g. auth challenge, missing query) still proves
+        # connectivity, which is what this UI test cares about.
+        def _probe(url: str, path: str, *, params: dict | None = None) -> str:
+            with httpx.Client(timeout=10) as client:
+                resp = client.get(f"{url.rstrip('/')}{path}", params=params)
+            if resp.status_code < 500:
+                return "ok"
+            return f"HTTP {resp.status_code}"
+
         try:
             with httpx.Client(timeout=10) as client:
                 resp = client.get(f"{catalog_url.rstrip('/')}/segments", params={"limit": 1})
-                resp.raise_for_status()
-                body = resp.json()
-                segment_count = len(body.get("items", []))
+            if resp.status_code < 500:
                 results["catalog"] = "ok"
+                if 200 <= resp.status_code < 300:
+                    try:
+                        body = resp.json()
+                        segment_count = len(body.get("items", []))
+                    except ValueError:
+                        segment_count = None
+            else:
+                results["catalog"] = f"HTTP {resp.status_code}"
         except Exception as e:
             results["catalog"] = str(e)
 
-        # Test sales
         if sales_url:
             try:
-                with httpx.Client(timeout=10) as client:
-                    resp = client.get(f"{sales_url.rstrip('/')}/api/v1/sales", params={"limit": 1})
-                    if resp.status_code < 500:
-                        results["sales"] = "ok"
-                    else:
-                        results["sales"] = f"HTTP {resp.status_code}"
+                results["sales"] = _probe(sales_url, "/api/v1/sales", params={"limit": 1})
             except Exception as e:
                 results["sales"] = str(e)
 
-        # Test activation (health probe — same pattern as typical service liveness)
         if activation_url:
             try:
-                with httpx.Client(timeout=10) as client:
-                    resp = client.get(f"{activation_url.rstrip('/')}/health")
-                    resp.raise_for_status()
-                    results["activation"] = "ok"
+                results["activation"] = _probe(activation_url, "/health")
             except Exception as e:
                 results["activation"] = str(e)
 
