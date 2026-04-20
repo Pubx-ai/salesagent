@@ -125,6 +125,42 @@ class CurationHttpClient:
                 recovery="transient",
             ) from e
 
+    def probe(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Shallow reachability probe for admin connectivity tests.
+
+        Unlike :meth:`_request`, this does NOT translate HTTP errors into
+        ``AdCPError`` subclasses — the admin UI cares about whether the
+        service answered at all, so any response below 500 counts as ``ok``
+        (a 401/403/404 still proves the URL resolves and the server is up).
+
+        Returns ``(status, body)`` where:
+        - ``status`` is ``"ok"`` for any response with status < 500,
+          ``"HTTP {code}"`` for 5xx, or ``str(exc)`` for transport failures.
+        - ``body`` is the parsed JSON dict on 2xx responses (if the payload
+          parses), otherwise ``None``.
+        """
+        client = self._get_client()
+        try:
+            resp = client.get(path, params=params)
+        except httpx.HTTPError as e:
+            return str(e), None
+        if resp.status_code >= 500:
+            return f"HTTP {resp.status_code}", None
+        body: dict[str, Any] | None = None
+        if 200 <= resp.status_code < 300:
+            try:
+                parsed = resp.json()
+            except (ValueError, _json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                body = parsed
+        return "ok", body
+
     def close(self) -> None:
         """No-op: the underlying httpx.Client is process-wide shared.
 
