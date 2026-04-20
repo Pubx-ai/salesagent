@@ -217,7 +217,7 @@ class CurationAdapter(ToolProvider):
                     )
 
         ext_dict = _ext_as_dict(request)
-        use_deal = ext_dict.get("sale_type") == "deal" or bool(_extract_dsps_from_ext(request))
+        use_deal = ext_dict.get("sale_type") == "deal" or bool(_dsps_from_ext_dict(ext_dict))
 
         if use_deal:
             sale_data = self._build_deal_sale_data(request, packages, start_time, end_time, package_pricing_info)
@@ -271,6 +271,21 @@ class CurationAdapter(ToolProvider):
         # Per-segment catalog lookup for domain enrichment; tolerate misses so a
         # single 404/outage doesn't block the sale, but only swallow the curation
         # adapter's own typed errors — real bugs should propagate.
+        #
+        # With 2+ distinct segments, paginate the full catalog once and let
+        # CatalogClient's _segment_cache serve the per-package lookups. That
+        # collapses the historical N+1 GET /segments/{id} pattern into a
+        # single walk of GET /segments?cursor=...
+        distinct_product_ids = {pkg.product_id for pkg in packages if pkg.product_id}
+        if len(distinct_product_ids) > 1:
+            try:
+                self._catalog.fetch_all_segments()
+            except (AdCPNotFoundError, AdCPAdapterError) as e:
+                logger.warning(
+                    "Bulk catalog warm-up failed, falling back to per-segment GETs: %s",
+                    e,
+                )
+
         catalog_by_id: dict[str, dict[str, Any]] = {}
         for pkg in packages:
             if pkg.product_id and pkg.product_id not in catalog_by_id:
@@ -792,13 +807,17 @@ def _ext_as_dict(request: CreateMediaBuyRequest) -> dict[str, Any]:
     return {**declared, **extras}
 
 
-def _extract_dsps_from_ext(request: CreateMediaBuyRequest) -> list[dict[str, Any]] | None:
-    """Extract DSP configuration from request.ext, or None if absent."""
-    ext_dict = _ext_as_dict(request)
-    dsps_from_ext = ext_dict.get("dsps")
-    if dsps_from_ext and isinstance(dsps_from_ext, list):
-        return dsps_from_ext
+def _dsps_from_ext_dict(ext_dict: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Return the DSP list from an already-normalized ``ext`` dict, or None."""
+    dsps = ext_dict.get("dsps")
+    if dsps and isinstance(dsps, list):
+        return dsps
     return None
+
+
+def _extract_dsps_from_ext(request: CreateMediaBuyRequest) -> list[dict[str, Any]] | None:
+    """Extract DSP configuration from ``request.ext`` , or None if absent."""
+    return _dsps_from_ext_dict(_ext_as_dict(request))
 
 
 def _build_creative_assignments(pkg: MediaPackage, orig_pkg: Any | None) -> list[dict[str, Any]]:
