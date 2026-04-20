@@ -860,9 +860,9 @@ class TestListMediaBuysResult:
 
 class TestParseIso:
     def test_parses_z_suffix(self):
-        from src.adapters.curation.adapter import _parse_iso
+        from src.adapters.curation._dt import parse_iso
 
-        result = _parse_iso("2026-04-09T12:34:56Z")
+        result = parse_iso("2026-04-09T12:34:56Z")
         assert result is not None
         assert result.year == 2026
         assert result.month == 4
@@ -870,21 +870,34 @@ class TestParseIso:
         assert result.hour == 12
 
     def test_parses_plus_offset(self):
-        from src.adapters.curation.adapter import _parse_iso
+        from src.adapters.curation._dt import parse_iso
 
-        result = _parse_iso("2026-04-09T12:34:56+00:00")
+        result = parse_iso("2026-04-09T12:34:56+00:00")
         assert result is not None
         assert result.year == 2026
 
     def test_returns_none_for_none(self):
-        from src.adapters.curation.adapter import _parse_iso
+        from src.adapters.curation._dt import parse_iso
 
-        assert _parse_iso(None) is None
+        assert parse_iso(None) is None
 
     def test_returns_none_for_empty_string(self):
-        from src.adapters.curation.adapter import _parse_iso
+        from src.adapters.curation._dt import parse_iso
 
-        assert _parse_iso("") is None
+        assert parse_iso("") is None
+
+    def test_raises_on_malformed_strict(self):
+        import pytest
+
+        from src.adapters.curation._dt import parse_iso
+
+        with pytest.raises(ValueError):
+            parse_iso("not-a-date")
+
+    def test_returns_none_on_malformed_safe(self):
+        from src.adapters.curation._dt import parse_iso
+
+        assert parse_iso("not-a-date", safe=True) is None
 
 
 # ── _sale_to_media_buy Converter Tests ────────────────────────────────────

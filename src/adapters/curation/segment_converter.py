@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import datetime
 from typing import Any
 
 from adcp import CpmPricingOption
@@ -27,6 +26,7 @@ from adcp.types.generated_poc.core.pricing_option import PricingOption
 from adcp.types.generated_poc.core.publisher_property_selector import PublisherPropertySelector
 from adcp.types.generated_poc.pricing_options.price_guidance import PriceGuidance
 
+from src.adapters.curation._dt import parse_iso
 from src.core.format_cache import DEFAULT_AGENT_URL
 from src.core.schemas.product import Product
 
@@ -174,34 +174,26 @@ def _build_forecast(estimation: dict[str, Any]) -> DeliveryForecast | None:
     if not avg_daily or not isinstance(avg_daily, (int, float)) or avg_daily <= 0:
         return None
 
-    low = int(avg_daily * 0.7) if avg_daily else None
-    high = int(avg_daily * 1.3) if avg_daily else None
+    low = int(avg_daily * 0.7)
+    high = int(avg_daily * 1.3)
 
     forecast_point = ForecastPoint(
         budget=1000.0,
         metrics=Metrics(
             impressions=ForecastRange(
-                low=float(low) if low else None,
+                low=float(low),
                 mid=float(avg_daily),
-                high=float(high) if high else None,
+                high=float(high),
             ),
         ),
     )
-
-    estimated_at_str = estimation.get("estimated_at")
-    generated_at = None
-    if estimated_at_str:
-        try:
-            generated_at = datetime.fromisoformat(estimated_at_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            pass
 
     return DeliveryForecast(
         points=[forecast_point],
         method="estimate",
         currency="USD",
         forecast_range_unit="daily",
-        generated_at=generated_at,
+        generated_at=parse_iso(estimation.get("estimated_at"), safe=True),
     )
 
 

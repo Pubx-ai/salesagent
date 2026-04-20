@@ -25,6 +25,7 @@ from src.adapters.base import (
     BaseConnectionConfig,
     ToolProvider,
 )
+from src.adapters.curation._dt import parse_iso
 from src.adapters.curation.activation_client import ActivationClient
 from src.adapters.curation.catalog_client import CatalogClient
 from src.adapters.curation.config import CurationConnectionConfig
@@ -68,16 +69,6 @@ class ListMediaBuysResult:
     media_buys: list[GetMediaBuysMediaBuy]
     truncated: bool
     total_fetched: int
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Parse an ISO8601 string into a datetime, or return None.
-
-    Handles both ``2026-04-09T12:34:56Z`` and ``2026-04-09T12:34:56+00:00``.
-    """
-    if not value:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 class CurationAdapter(ToolProvider):
@@ -709,8 +700,8 @@ class CurationAdapter(ToolProvider):
             currency=currency,
             total_budget=float(sale.get("budget") or 0.0),
             packages=packages,
-            created_at=_parse_iso(sale.get("created_at")),
-            updated_at=_parse_iso(sale.get("updated_at")),
+            created_at=parse_iso(sale.get("created_at")),
+            updated_at=parse_iso(sale.get("updated_at")),
         )
 
     def _convert_campaign_segments(self, sale: dict) -> list[GetMediaBuysPackage]:
