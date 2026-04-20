@@ -106,10 +106,15 @@ class Product(LibraryProduct):
         exclude=True,  # Exclude from serialization by default
     )
 
-    # AI ranking result (set by LLM ranking, not stored in DB)
+    # AI ranking result — emitted on the wire via ``ext.relevance_score``
+    # (the AdCP-sanctioned vendor extension point), NOT at the root. This
+    # field is retained as an internal attribute for convenience but is
+    # excluded from serialization so it cannot leak to external consumers.
+    # See src/core/tools/products.py where ext.relevance_score is populated.
     relevance_score: float | None = Field(
         default=None,
-        description="AI-computed relevance score (0.0-1.0) for the buyer's brief",
+        description="Internal: AI-computed relevance score (0.0-1.0). Serialized via ext.relevance_score.",
+        exclude=True,
     )
 
     @model_validator(mode="after")

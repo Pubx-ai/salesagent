@@ -793,11 +793,30 @@ async def _get_products_impl(
                 # weakly-matching products the AI was instructed to omit.
                 eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.3]
 
-                # Write ranking results back to product objects
+                # Write ranking results back to product objects.
+                # ``relevance_score`` is our own extension — not an AdCP root
+                # field — so we emit it under ``ext.relevance_score`` (the
+                # spec-sanctioned vendor extension point). Buyers migrated
+                # off reading ``product.relevance_score`` at root before this
+                # change landed; once every consumer is on ``ext.*``, the
+                # model field can be dropped entirely (tracked in
+                # salesagent-63n).
+                from adcp.types import ExtensionObject
+
                 for product in eligible_products:
                     score, reason = ranking_map.get(product.product_id, (0.0, ""))
                     product.brief_relevance = reason or None
-                    product.relevance_score = round(score, 2)
+                    # ExtensionObject uses model_config={"extra": "allow"} with no
+                    # declared fields, so content lives in ``model_extra``. Reading
+                    # that keeps us within the "no model_dump in _impl" guard while
+                    # still merging correctly with dict-shaped ext (seed data, older
+                    # code paths) and ExtensionObject instances (normal path).
+                    existing_ext: dict[str, Any] = {}
+                    if isinstance(product.ext, dict):
+                        existing_ext = product.ext
+                    elif product.ext is not None:
+                        existing_ext = dict(product.ext.model_extra or {})
+                    product.ext = ExtensionObject.model_validate({**existing_ext, "relevance_score": round(score, 2)})
 
                 # Log the ranking results
                 for r in ranking_result.rankings:

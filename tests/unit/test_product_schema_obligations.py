@@ -1824,3 +1824,85 @@ class TestRelevanceThresholdSchema:
         # No brief_relevance on product means no ranking was applied
         dumped = product.model_dump()
         assert dumped.get("brief_relevance") is None
+
+    async def test_relevance_score_emitted_under_ext_not_root(self):
+        """AI-ranked products expose relevance_score under ext, not at the root.
+
+        Regression guard: AdCP spec does not define a root-level
+        ``relevance_score`` field. Emitting it there silently extended the
+        wire format. It now lives under ``ext.relevance_score`` (the
+        sanctioned vendor extension point) while the root attribute on the
+        Python model is retained as ``exclude=True`` for internal use.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        with ProductEnv() as env:
+            env.add_product(product_id="prod_ranked")
+
+            env.identity.tenant["product_ranking_prompt"] = "rank by relevance"
+            mock_factory = MagicMock()
+            mock_factory.is_ai_enabled.return_value = True
+            mock_factory.create_model.return_value = MagicMock()
+            env.mock["ranking_factory"].return_value = mock_factory
+
+            mock_result = MagicMock()
+            mock_result.rankings = [MagicMock(product_id="prod_ranked", relevance_score=0.87, reason="Highly relevant")]
+
+            with (
+                patch(
+                    "src.services.ai.agents.ranking_agent.rank_products_async",
+                    new_callable=AsyncMock,
+                    return_value=mock_result,
+                ),
+                patch("src.services.ai.agents.ranking_agent.create_ranking_agent"),
+            ):
+                response = await env.call_impl(brief="test")
+
+            product = next(p for p in response.products if p.product_id == "prod_ranked")
+            dumped = product.model_dump()
+
+            # Wire shape: ext.relevance_score present, root-level absent
+            assert "relevance_score" not in dumped, (
+                "relevance_score must not leak at the root of the AdCP response; "
+                "it is a vendor extension and belongs under ext"
+            )
+            assert dumped.get("ext", {}).get("relevance_score") == 0.87
+
+    async def test_relevance_score_ext_preserves_existing_ext_keys(self):
+        """Writing relevance_score to ext must not clobber other ext fields.
+
+        Sellers (e.g. CurationAdapter) already populate ext with domain
+        metadata like ``signals_used`` and ``domains``. The ranking write
+        must merge, not overwrite.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        with ProductEnv() as env:
+            # Seed a product whose ext already has vendor-specific keys
+            env.add_product(product_id="prod_ext", ext={"signals_used": ["sports"], "domains": ["a.com"]})
+
+            env.identity.tenant["product_ranking_prompt"] = "rank by relevance"
+            mock_factory = MagicMock()
+            mock_factory.is_ai_enabled.return_value = True
+            mock_factory.create_model.return_value = MagicMock()
+            env.mock["ranking_factory"].return_value = mock_factory
+
+            mock_result = MagicMock()
+            mock_result.rankings = [MagicMock(product_id="prod_ext", relevance_score=0.55, reason="ok")]
+
+            with (
+                patch(
+                    "src.services.ai.agents.ranking_agent.rank_products_async",
+                    new_callable=AsyncMock,
+                    return_value=mock_result,
+                ),
+                patch("src.services.ai.agents.ranking_agent.create_ranking_agent"),
+            ):
+                response = await env.call_impl(brief="test")
+
+            product = next(p for p in response.products if p.product_id == "prod_ext")
+            ext = product.model_dump().get("ext", {})
+
+            assert ext.get("relevance_score") == 0.55
+            assert ext.get("signals_used") == ["sports"]
+            assert ext.get("domains") == ["a.com"]
