@@ -129,89 +129,6 @@ from src.services.activity_feed import activity_feed
 # --- Helper Functions ---
 
 
-def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[MediaPackage]:
-    """Build MediaPackage list from request for external adapters.
-
-    Used by adapters with manages_own_persistence=True that bypass Postgres.
-    Passes through budget, format_ids, targeting_overlay, and creative_ids
-    so the adapter can build rich sale payloads (e.g. campaign segments).
-
-    Inline ``package.creatives`` are intentionally NOT copied onto MediaPackage
-    — the curation adapter reads them directly from ``request.packages`` via
-    ``_build_creative_assignments`` so they still reach the Sales service. See
-    :func:`_validate_inline_creatives_for_external_adapter` for the fail-fast
-    check run before we get here.
-    """
-    from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
-
-    packages: list[MediaPackage] = []
-    for i, pkg in enumerate(req.packages or []):
-        product_id = getattr(pkg, "product_id", "unknown")
-        bid_price = getattr(pkg, "bid_price", None)
-        budget = getattr(pkg, "budget", None)
-        creative_ids = getattr(pkg, "creative_ids", None)
-        targeting_overlay = getattr(pkg, "targeting_overlay", None)
-
-        # Use format_ids from the request package if available, else default
-        pkg_format_ids = getattr(pkg, "format_ids", None)
-        if pkg_format_ids:
-            format_ids = list(pkg_format_ids)
-        else:
-            format_ids = [LibraryFormatId(id="display_banner", agent_url="https://creative.adcontextprotocol.org")]
-
-        packages.append(
-            MediaPackage(
-                package_id=getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}",
-                name=f"Package for {product_id}",
-                delivery_type="non_guaranteed",
-                cpm=float(bid_price) if bid_price else 0.0,
-                impressions=0,
-                format_ids=format_ids,
-                product_id=product_id,
-                buyer_ref=getattr(pkg, "buyer_ref", None),
-                budget=float(budget) if budget else None,
-                creative_ids=creative_ids,
-                targeting_overlay=targeting_overlay,
-            )
-        )
-    return packages
-
-
-def _validate_inline_creatives_for_external_adapter(req: CreateMediaBuyRequest) -> None:
-    """Fail fast on malformed inline creatives before they reach the adapter.
-
-    The Postgres-backed path runs inline creatives through
-    ``process_and_upload_package_creatives``, which validates structure and
-    substitutes server-assigned IDs. The adapter-managed path (curation)
-    skips that preprocessing, so without a check here, malformed inline
-    creatives reach the external Sales service with empty ``creative_id`` and
-    no ``format_id``, producing junk assignments that are hard to trace back.
-
-    Required shape per inline creative:
-        - ``format_id`` must be present.
-        - Must have EITHER a ``creative_id`` (library reference) OR a
-          non-empty ``tag``/``snippet``/``assets.snippet`` (inline content).
-
-    Raises:
-        AdCPValidationError: The first malformed creative found; the message
-            points at the offending ``packages[i].creatives[j]`` coordinate so
-            the caller can fix the request.
-    """
-    for i, pkg in enumerate(req.packages or []):
-        inline = getattr(pkg, "creatives", None) or []
-        for j, c in enumerate(inline):
-            coord = f"packages[{i}].creatives[{j}]"
-            if not getattr(c, "format_id", None):
-                raise AdCPValidationError(f"{coord}.format_id is required for inline creatives on curation tenants")
-            assets = getattr(c, "assets", None)
-            assets_snippet = None
-            if assets is not None:
-                assets_snippet = assets.get("snippet") if isinstance(assets, dict) else getattr(assets, "snippet", None)
-            has_content = getattr(c, "tag", None) or getattr(c, "snippet", None) or assets_snippet
-            if not getattr(c, "creative_id", None) and not has_content:
-                raise AdCPValidationError(f"{coord} must carry either creative_id or inline tag/snippet content")
-
-
 def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime]:
     """Extract and validate start/end times from a CreateMediaBuyRequest.
 
@@ -1467,50 +1384,22 @@ async def _create_media_buy_impl(
         )
 
     # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
-    # These adapters bypass Postgres entirely -- no setup validation, no buyer_ref dedup,
-    # no workflow steps, no ORM creation. The adapter handles the full lifecycle.
-    manages_own_persistence = adapter_manages_own_persistence(tenant)
+    # Tool-shaped logic lives on the adapter; core just dispatches.
+    if adapter_manages_own_persistence(tenant):
+        ext_adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
+        from src.adapters.curation.adapter import CurationAdapter
 
-    if manages_own_persistence:
-        # Apply request-level invariants that hold regardless of adapter so the
-        # curation path doesn't accept malformed requests the Postgres path
-        # would reject. These are the minimum cross-adapter checks; richer
-        # validation lives downstream and runs after the early return.
-        if not req.packages:
-            raise AdCPValidationError("CreateMediaBuyRequest.packages must contain at least one package")
-        if not req.buyer_ref:
-            raise AdCPValidationError("CreateMediaBuyRequest.buyer_ref is required")
-
-        # process_and_upload_package_creatives doesn't run on this path, so
-        # mirror its shape invariants here instead of letting malformed inline
-        # creatives hit the Sales service with blank creative_ids.
-        _validate_inline_creatives_for_external_adapter(req)
-
+        if not isinstance(ext_adapter, CurationAdapter):
+            raise AdCPAdapterError(
+                f"Adapter {type(ext_adapter).__name__} declares manages_own_persistence=True "
+                f"but does not subclass CurationAdapter; cannot dispatch create_media_buy"
+            )
         try:
-            ext_adapter = get_adapter(
-                principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant
-            )
-            ext_packages = _build_packages_for_external_adapter(req)
-            start_time, end_time = _parse_request_times(req)
-            pkg_pricing = _build_package_pricing_info(req)
-
-            # `create_media_buy` on ToolProvider-only adapters (curation) runs
-            # a synchronous `httpx.Client.post(...)` against an external service.
-            # Offload to a thread so this coroutine yields the event loop while
-            # the sales/activation round trips are outstanding.
-            response = await asyncio.to_thread(
-                ext_adapter.create_media_buy, req, ext_packages, start_time, end_time, pkg_pricing
-            )
-            status = (
-                AdcpTaskStatus.completed.value
-                if isinstance(response, CreateMediaBuySuccess)
-                else AdcpTaskStatus.failed.value
-            )
-            return CreateMediaBuyResult(response=response, status=status)
+            # create_media_buy_for_tool internally calls the adapter's sync
+            # create_media_buy; offload to a thread so this coroutine yields
+            # the event loop during the HTTP round trip.
+            return await asyncio.to_thread(ext_adapter.create_media_buy_for_tool, req, testing_ctx)
         except AdCPError:
-            # Preserve typed AdCP errors (validation, not-found, auth, …) so the
-            # transport layer maps them to the right status code/recovery hint
-            # instead of flattening everything into a generic adapter error.
             logger.exception("External adapter create_media_buy raised typed AdCPError")
             raise
         except Exception as e:

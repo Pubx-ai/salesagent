@@ -19,12 +19,14 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.core.schemas import (
+        CreateMediaBuyResult,
         GetMediaBuyDeliveryRequest,
         GetMediaBuyDeliveryResponse,
         GetMediaBuysRequest,
         GetMediaBuysResponse,
     )
     from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+    from src.core.testing_hooks import AdCPTestContext
 
 from adcp.types.aliases import Package as ResponsePackage
 from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
@@ -278,6 +280,127 @@ class CurationAdapter(ToolProvider):
             creative_deadline=creative_deadline,
             packages=pkg_responses,
         )
+
+    def create_media_buy_for_tool(
+        self,
+        req: CreateMediaBuyRequest,
+        testing_ctx: AdCPTestContext | None,
+    ) -> CreateMediaBuyResult:
+        """Tool-shaped create entry for media_buy_create.
+
+        Validates request-level invariants that the Postgres path would
+        otherwise enforce (non-empty packages, buyer_ref, well-formed inline
+        creatives), builds the MediaPackage list the adapter's
+        create_media_buy expects, then delegates. Wraps the response in a
+        CreateMediaBuyResult with the right task status.
+
+        Replaces the early-return block + _build_packages_for_external_adapter
+        + _validate_inline_creatives_for_external_adapter helpers that used to
+        live in src/core/tools/media_buy_create.py.
+        """
+        from src.core.schemas import CreateMediaBuyResult
+        from src.core.tools.media_buy_create import (
+            AdcpTaskStatus,
+            _build_package_pricing_info,
+            _parse_request_times,
+        )
+
+        if not req.packages:
+            raise AdCPValidationError("CreateMediaBuyRequest.packages must contain at least one package")
+        if not req.buyer_ref:
+            raise AdCPValidationError("CreateMediaBuyRequest.buyer_ref is required")
+
+        self._validate_inline_creatives(req)
+
+        ext_packages = self._build_adapter_packages(req)
+        start_time, end_time = _parse_request_times(req)
+        pkg_pricing = _build_package_pricing_info(req)
+
+        response = self.create_media_buy(req, ext_packages, start_time, end_time, pkg_pricing)
+        status = (
+            AdcpTaskStatus.completed.value
+            if isinstance(response, CreateMediaBuySuccess)
+            else AdcpTaskStatus.failed.value
+        )
+        return CreateMediaBuyResult(response=response, status=status)
+
+    def _validate_inline_creatives(self, req: CreateMediaBuyRequest) -> None:
+        """Fail fast on malformed inline creatives before they reach the adapter.
+
+        The Postgres-backed path runs inline creatives through
+        ``process_and_upload_package_creatives``, which validates structure and
+        substitutes server-assigned IDs. This adapter-managed path skips that
+        preprocessing, so without a check here, malformed inline creatives
+        reach the external Sales service with empty ``creative_id`` and no
+        ``format_id``, producing junk assignments that are hard to trace back.
+
+        Required shape per inline creative:
+            - ``format_id`` must be present.
+            - Must have EITHER a ``creative_id`` (library reference) OR a
+              non-empty ``tag``/``snippet``/``assets.snippet`` (inline content).
+
+        Raises:
+            AdCPValidationError: The first malformed creative found; the
+                message points at the offending ``packages[i].creatives[j]``
+                coordinate so the caller can fix the request.
+        """
+        for i, pkg in enumerate(req.packages or []):
+            inline = getattr(pkg, "creatives", None) or []
+            for j, c in enumerate(inline):
+                coord = f"packages[{i}].creatives[{j}]"
+                if not getattr(c, "format_id", None):
+                    raise AdCPValidationError(f"{coord}.format_id is required for inline creatives on curation tenants")
+                assets = getattr(c, "assets", None)
+                assets_snippet = None
+                if assets is not None:
+                    assets_snippet = (
+                        assets.get("snippet") if isinstance(assets, dict) else getattr(assets, "snippet", None)
+                    )
+                has_content = getattr(c, "tag", None) or getattr(c, "snippet", None) or assets_snippet
+                if not getattr(c, "creative_id", None) and not has_content:
+                    raise AdCPValidationError(f"{coord} must carry either creative_id or inline tag/snippet content")
+
+    def _build_adapter_packages(self, req: CreateMediaBuyRequest) -> list[MediaPackage]:
+        """Build the MediaPackage list this adapter's create_media_buy expects.
+
+        Inline ``package.creatives`` are intentionally NOT copied onto
+        MediaPackage — this adapter reads them directly from
+        ``request.packages`` via ``_build_creative_assignments`` so they still
+        reach the Sales service. See :meth:`_validate_inline_creatives` for
+        the fail-fast check run before we get here.
+        """
+        from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
+
+        packages: list[MediaPackage] = []
+        for i, pkg in enumerate(req.packages or []):
+            product_id = getattr(pkg, "product_id", "unknown")
+            bid_price = getattr(pkg, "bid_price", None)
+            budget = getattr(pkg, "budget", None)
+            creative_ids = getattr(pkg, "creative_ids", None)
+            targeting_overlay = getattr(pkg, "targeting_overlay", None)
+
+            pkg_format_ids = getattr(pkg, "format_ids", None)
+            if pkg_format_ids:
+                format_ids = list(pkg_format_ids)
+            else:
+                format_ids = [LibraryFormatId(id="display_banner", agent_url="https://creative.adcontextprotocol.org")]
+
+            packages.append(
+                MediaPackage(
+                    package_id=getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}",
+                    name=f"Package for {product_id}",
+                    delivery_type="non_guaranteed",
+                    cpm=float(bid_price) if bid_price else 0.0,
+                    impressions=0,
+                    format_ids=format_ids,
+                    product_id=product_id,
+                    buyer_ref=getattr(pkg, "buyer_ref", None),
+                    budget=float(budget) if budget else None,
+                    creative_ids=creative_ids,
+                    targeting_overlay=targeting_overlay,
+                )
+            )
+        return packages
 
     def _build_campaign_sale_data(
         self,

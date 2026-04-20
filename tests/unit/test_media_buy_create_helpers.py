@@ -11,10 +11,38 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.exceptions import AdCPValidationError
-from src.core.tools.media_buy_create import (
-    _get_format_spec_sync,
-    _validate_inline_creatives_for_external_adapter,
-)
+from src.core.tools.media_buy_create import _get_format_spec_sync
+
+
+def _make_curation_adapter():
+    """Build a minimal CurationAdapter for exercising the inline-creative validator."""
+    from src.adapters.curation.adapter import CurationAdapter
+
+    principal = MagicMock()
+    principal.principal_id = "test-principal"
+    principal.get_adapter_id = MagicMock(return_value="curation-id")
+
+    return CurationAdapter(
+        {
+            "catalog_service_url": "http://catalog:8000",
+            "sales_service_url": "http://sales:8001",
+            "activation_service_url": "http://activation:8002",
+        },
+        principal,
+        dry_run=False,
+        tenant_id="test-tenant",
+    )
+
+
+def _validate_inline_creatives_for_external_adapter(req):
+    """Delegate to CurationAdapter._validate_inline_creatives.
+
+    The function of that name used to live in src/core/tools/media_buy_create.py
+    but was hoisted onto the adapter as part of the curation isolation refactor.
+    The existing test cases still exercise the same invariants — we just go
+    through the adapter now.
+    """
+    _make_curation_adapter()._validate_inline_creatives(req)
 
 
 class TestGetFormatSpecSync:

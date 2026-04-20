@@ -2132,3 +2132,112 @@ class TestCurationAdapterGetMediaBuysForTool:
         adapter.get_media_buys_for_tool(req, include_snapshot=True)
 
         assert pkg.snapshot_unavailable_reason == SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
+
+
+class TestCurationAdapterCreateMediaBuyForTool:
+    """Tool-shaped create entry: accepts CreateMediaBuyRequest + testing_ctx,
+    validates inline creatives, builds MediaPackage list, calls
+    self.create_media_buy, wraps the response in a CreateMediaBuyResult.
+    Replaces the curation branch in _create_media_buy_impl."""
+
+    def test_rejects_empty_packages(self):
+        from types import SimpleNamespace
+
+        import pytest
+
+        from src.core.exceptions import AdCPValidationError
+
+        adapter = _make_adapter()
+        req = SimpleNamespace(packages=[], buyer_ref="b-1")
+
+        with pytest.raises(AdCPValidationError, match="packages"):
+            adapter.create_media_buy_for_tool(req, testing_ctx=None)
+
+    def test_rejects_missing_buyer_ref(self):
+        from types import SimpleNamespace
+
+        import pytest
+
+        from src.core.exceptions import AdCPValidationError
+
+        adapter = _make_adapter()
+        req = SimpleNamespace(
+            packages=[SimpleNamespace(product_id="p1")],
+            buyer_ref="",
+        )
+
+        with pytest.raises(AdCPValidationError, match="buyer_ref"):
+            adapter.create_media_buy_for_tool(req, testing_ctx=None)
+
+    def test_rejects_inline_creative_missing_format_id(self):
+        from types import SimpleNamespace
+
+        import pytest
+
+        from src.core.exceptions import AdCPValidationError
+
+        adapter = _make_adapter()
+        bad_creative = SimpleNamespace(creative_id="c1", format_id=None)
+        pkg = SimpleNamespace(
+            product_id="p1",
+            creatives=[bad_creative],
+            creative_ids=None,
+            bid_price=None,
+            budget=None,
+            targeting_overlay=None,
+            package_id=None,
+            format_ids=None,
+            buyer_ref=None,
+        )
+        req = SimpleNamespace(packages=[pkg], buyer_ref="b-1")
+
+        with pytest.raises(AdCPValidationError, match="format_id"):
+            adapter.create_media_buy_for_tool(req, testing_ctx=None)
+
+    def test_happy_path_dispatches_to_create_media_buy(self):
+        from datetime import UTC, datetime, timedelta
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from src.core.schemas import CreateMediaBuySuccess
+
+        adapter = _make_adapter()
+        adapter.create_media_buy = MagicMock(
+            return_value=CreateMediaBuySuccess(media_buy_id="mb-new", buyer_ref="b-1", packages=[])
+        )
+
+        pkg = SimpleNamespace(
+            product_id="p1",
+            creatives=None,
+            creative_ids=["c-existing"],
+            bid_price=5.0,
+            budget=1000,
+            targeting_overlay=None,
+            package_id=None,
+            format_ids=None,
+            buyer_ref=None,
+        )
+        req = SimpleNamespace(
+            packages=[pkg],
+            buyer_ref="b-1",
+            promoted_offering="x",
+            start_time=None,
+            end_time=datetime.now(UTC) + timedelta(days=7),
+            brand=None,
+            po_number=None,
+            account=None,
+        )
+
+        result = adapter.create_media_buy_for_tool(req, testing_ctx=None)
+
+        assert isinstance(result.response, CreateMediaBuySuccess)
+        # Verify the adapter got the same request object + a non-empty MediaPackage list
+        # plus the parsed start/end times. We use ANY for pricing info (built from the
+        # request internally) because its exact shape isn't the subject of this test.
+        from unittest.mock import ANY
+
+        adapter.create_media_buy.assert_called_once_with(req, ANY, ANY, ANY, ANY)
+        call_args = adapter.create_media_buy.call_args
+        assert call_args.args[0] is req
+        assert len(call_args.args[1]) == 1
+        assert call_args.args[1][0].product_id == "p1"
