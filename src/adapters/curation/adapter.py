@@ -97,25 +97,21 @@ class CurationAdapter(ToolProvider):
         preserved. Called from ``save_adapter_config`` after the adapter
         config write commits.
         """
-        from sqlalchemy import select
-
         from src.adapters.curation.ranking import DEFAULT_CURATION_RANKING_PROMPT
         from src.core.database.database_session import get_db_session
-        from src.core.database.models import Tenant
+        from src.core.database.repositories.tenant_config import TenantConfigRepository
 
         with get_db_session() as session:
-            tenant = session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
-            if tenant is None:
-                logger.info(
-                    "on_config_saved: no Tenant row for %s; skipping prompt seed",
-                    tenant_id,
-                )
-                return
-            if not tenant.product_ranking_prompt:
-                tenant.product_ranking_prompt = DEFAULT_CURATION_RANKING_PROMPT
-                session.commit()
+            repo = TenantConfigRepository(session, tenant_id)
+            seeded = repo.seed_ranking_prompt_if_unset(DEFAULT_CURATION_RANKING_PROMPT)
+            if seeded:
                 logger.info(
                     "Seeded default curation ranking prompt for tenant %s",
+                    tenant_id,
+                )
+            else:
+                logger.debug(
+                    "on_config_saved: prompt already set (or tenant missing) for %s",
                     tenant_id,
                 )
 

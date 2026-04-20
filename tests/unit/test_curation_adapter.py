@@ -601,7 +601,7 @@ class TestCurationAdapterOnConfigSaved:
             CurationAdapter.on_config_saved("t-1")
 
         assert mock_tenant.product_ranking_prompt == DEFAULT_CURATION_RANKING_PROMPT
-        mock_session.commit.assert_called_once()
+        mock_session.commit.assert_called_once_with()
 
     def test_seeds_default_prompt_when_tenant_prompt_is_empty_string(self):
         from unittest.mock import MagicMock, patch
