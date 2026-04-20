@@ -165,7 +165,6 @@ async def _get_products_impl(
     if not req.brief and not req.brand and not req.filters:
         raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required")
 
-    # Extract identity fields
     if identity is None:
         raise AdCPValidationError("Identity is required")
 
@@ -189,7 +188,6 @@ async def _get_products_impl(
             "Cannot determine tenant context. Please provide valid authentication or ensure tenant can be identified from request headers."
         )
 
-    # Get the Principal object with ad server mappings
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id) if principal_id else None
 
     # Extract offering text from brand (adcp 3.6.0: brand replaces brand_manifest).
@@ -200,7 +198,6 @@ async def _get_products_impl(
         if domain:
             offering = f"Brand at {domain}"
 
-    # Check brand_manifest_policy from tenant settings
     brand_manifest_policy = tenant.get("brand_manifest_policy", "require_auth")
 
     # Enforce policy-based validation
@@ -221,7 +218,6 @@ async def _get_products_impl(
 
     # Note: brand_manifest validation is handled by Pydantic schema, no need for runtime validation here
 
-    # Check policy compliance first (if enabled)
     advertising_policy = safe_parse_json_field(
         tenant.get("advertising_policy"), field_name="advertising_policy", default={}
     )
@@ -239,7 +235,6 @@ async def _get_products_impl(
         policy_disabled_reason = "disabled_by_tenant"
         logger.info(f"Policy checks disabled for tenant {tenant['tenant_id']}")
     else:
-        # Get tenant's Gemini API key for policy checks
         tenant_gemini_key = tenant.get("gemini_api_key")
         if not tenant_gemini_key:
             # No API key - cannot run policy checks
@@ -260,7 +255,6 @@ async def _get_products_impl(
                     tenant_policies=tenant_policies if tenant_policies else None,
                 )
 
-                # Log successful policy check
                 audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
                 audit_logger.log_operation(
                     operation="policy_check",
@@ -405,7 +399,6 @@ async def _get_products_impl(
     if principal_id:
         filtered_by_access = []
         for product in products:
-            # Check if product has access restrictions
             allowed_ids = getattr(product, "allowed_principal_ids", None)
             if allowed_ids is None or len(allowed_ids) == 0:
                 # No restrictions - visible to all
@@ -459,18 +452,13 @@ async def _get_products_impl(
     try:
         from src.services.dynamic_products import generate_variants_for_brief
 
-        # Get our agent URL for deployment specification
         our_agent_url = tenant.get("virtual_host")  # Our sales agent URL (e.g., https://sales.example.com)
 
         dynamic_variants = await generate_variants_for_brief(tenant["tenant_id"], brief_text, our_agent_url)
         if dynamic_variants:
-            # Convert Product models to Product schemas for response
-
             for variant_model in dynamic_variants:
-                # Convert database model to schema (returns library Product)
                 # Cast to our extended Product type for mypy compatibility
                 variant_schema = convert_product_model_to_schema(variant_model, adapter_type=tenant_adapter_type)
-                # Type: ignore - library Product is compatible with our extended Product at runtime
                 products.append(variant_schema)
 
             logger.info(f"[GET_PRODUCTS] Added {len(dynamic_variants)} dynamic product variants")
@@ -717,8 +705,6 @@ async def _get_products_impl(
                 model = factory.create_model(tenant_ai_config=tenant_ai_config)
                 agent = create_ranking_agent(model)
 
-                # Convert products to dicts for ranking
-                # Run AI ranking
                 ranking_result = await rank_products_async(
                     agent=agent,
                     custom_prompt=product_ranking_prompt,
@@ -726,11 +712,9 @@ async def _get_products_impl(
                     products=eligible_products,
                 )
 
-                # Build a map of product_id -> (score, reason)
                 ranking_map = {r.product_id: (r.relevance_score, r.reason) for r in ranking_result.rankings}
 
-                # Sort products by relevance score (highest first)
-                # Products not in ranking_map get score 0
+                # Products not in ranking_map get score 0 (sorted last).
                 eligible_products.sort(
                     key=lambda p: ranking_map.get(p.product_id, (0.0, ""))[0],
                     reverse=True,
@@ -845,11 +829,9 @@ async def _get_products_impl(
         except (ImportError, RuntimeError, OSError, ValueError) as e:
             logger.warning(f"Failed to annotate pricing options with adapter support: {e}")
 
-    # Filter pricing data for anonymous users
-    # Do this BEFORE serialization to avoid reconstruction issues
-    if principal_id is None:  # Anonymous user
-        # Remove pricing data from products for anonymous users
-        # Set to empty list to hide pricing (will be excluded during serialization)
+    # Hide pricing data from anonymous users BEFORE serialization (empty list is
+    # excluded from the wire payload, avoiding reconstruction issues downstream).
+    if principal_id is None:
         for product in eligible_products:
             product.pricing_options = []
 
@@ -867,7 +849,6 @@ async def _get_products_impl(
         context=req.context,
     )
 
-    # Log successful get_products call
     elapsed_ms = int((time.time() - start_time) * 1000)
     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
     audit_logger.log_operation(
@@ -915,7 +896,6 @@ async def get_products(
     Returns:
         ToolResult with human-readable text and structured data
     """
-    # Build request object for shared implementation
     try:
         req = create_get_products_request(
             brief=brief,
@@ -928,17 +908,13 @@ async def get_products(
     except ValidationError as e:
         raise AdCPValidationError(format_validation_error(e, context="get_products request")) from e
     except ValueError as e:
-        # Convert ValueError from helper to ToolError with clear message
         raise AdCPValidationError(f"Invalid get_products request: {e}") from e
 
     # Read identity pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
 
-    # Call shared implementation
-    # Note: GetProductsRequest is now a flat class (not RootModel), so pass req directly
     response = await _get_products_impl(req, identity)
 
-    # Return ToolResult with human-readable text and structured data
     response_dict = response.model_dump(mode="json")
     # Apply v2.x backward-compat fields only for pre-3.0 clients
     from src.core.version_compat import apply_version_compat
@@ -985,7 +961,6 @@ async def get_products_raw(
 
         identity = resolve_identity_from_context(ctx, require_valid_token=False)
 
-    # Create request object - adcp library validates schema
     req = create_get_products_request(
         brief=brief or "",
         brand=brand,
@@ -994,7 +969,6 @@ async def get_products_raw(
         context=context,
     )
 
-    # Call shared implementation
     return await _get_products_impl(req, identity)
 
 

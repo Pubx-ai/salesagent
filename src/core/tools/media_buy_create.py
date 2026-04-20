@@ -122,8 +122,6 @@ from src.core.schemas import (
 from src.core.testing_hooks import AdCPTestContext, TestingContext, apply_testing_hooks
 from src.core.tool_context import ToolContext
 from src.core.tools.financial_validation import validate_max_daily_package_spend, validate_min_package_budget
-
-# Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import format_validation_error
 from src.services.activity_feed import activity_feed
 

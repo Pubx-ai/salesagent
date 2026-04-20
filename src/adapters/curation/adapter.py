@@ -292,7 +292,6 @@ class CurationAdapter(ToolProvider):
             pricing_model = pricing_info_dict.get("pricing_model", "cpm")
             is_fixed = pricing_info_dict.get("is_fixed", False)
 
-            # Get pricing_option_id from the original request package
             orig_pkg = req_pkg_by_product.get(pkg.product_id or "")
             pricing_option_id = getattr(orig_pkg, "pricing_option_id", None) if orig_pkg else None
             if not pricing_option_id:
@@ -330,7 +329,6 @@ class CurationAdapter(ToolProvider):
             # or fall back to creative_ids (string references)
             creative_assignments = _build_creative_assignments(pkg, orig_pkg)
 
-            # Build pricing_info with all fields
             pricing_info: dict[str, Any] | None = None
             if rate:
                 pricing_info = {"rate": float(rate), "currency": currency}
@@ -359,7 +357,6 @@ class CurationAdapter(ToolProvider):
                 }
             )
 
-        # Build campaign_meta with optional po_number and account_id
         buyer_ref = request.buyer_ref or "unknown"
         order_name = f"{brand_domain}-{buyer_ref}" if brand_domain else buyer_ref
         campaign_meta: dict[str, Any] = {
