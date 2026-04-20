@@ -688,13 +688,10 @@ async def _get_products_impl(
                     filtered_products.append(product)
         eligible_products = filtered_products
 
-    # AI-powered product ranking (when tenant has product_ranking_prompt configured)
-    # Curation adapters get a built-in default prompt if none is set on the tenant
+    # AI-powered product ranking (when tenant has product_ranking_prompt configured).
+    # Curation tenants get their prompt seeded at adapter-config-save time via
+    # CurationAdapter.on_config_saved — no adapter-specific branch here.
     product_ranking_prompt = tenant.get("product_ranking_prompt")
-    if not product_ranking_prompt and adapter_manages_own_persistence(tenant):
-        from src.services.ai.agents.ranking_agent import DEFAULT_CURATION_RANKING_PROMPT
-
-        product_ranking_prompt = DEFAULT_CURATION_RANKING_PROMPT
 
     if product_ranking_prompt and brief_text and eligible_products:
         try:

@@ -1831,3 +1831,25 @@ class TestBuildCreativeAssignments:
         assert len(result) == 1
         assert result[0]["tag"] == "<div>ad</div>"
         assert result[0]["snippet_type"] == "html"
+
+
+class TestRankingPromptLocation:
+    """DEFAULT_CURATION_RANKING_PROMPT moved out of services/ai to live with
+    the curation adapter. Keeps the rebase surface small in the shared
+    ranking agent module.
+    """
+
+    def test_prompt_importable_from_curation_module(self):
+        from src.adapters.curation.ranking import DEFAULT_CURATION_RANKING_PROMPT
+
+        assert isinstance(DEFAULT_CURATION_RANKING_PROMPT, str)
+        assert "audience matching expert" in DEFAULT_CURATION_RANKING_PROMPT
+
+    def test_prompt_no_longer_exported_from_ranking_agent(self):
+        from src.services.ai.agents import ranking_agent
+
+        assert not hasattr(ranking_agent, "DEFAULT_CURATION_RANKING_PROMPT"), (
+            "DEFAULT_CURATION_RANKING_PROMPT must live in "
+            "src/adapters/curation/ranking.py only — keeping a copy in "
+            "services/ai would drift the two."
+        )
