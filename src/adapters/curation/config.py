@@ -18,15 +18,12 @@ class CurationConnectionConfig(BaseConnectionConfig):
 
     catalog_service_url: str = Field(
         default_factory=lambda: os.getenv("CURATION_CATALOG_URL", "http://localhost:8000"),
-        description="Base URL for the Curation Catalog service",
     )
     sales_service_url: str = Field(
         default_factory=lambda: os.getenv("CURATION_SALES_URL", "http://localhost:8001"),
-        description="Base URL for the Curation Sales service",
     )
     activation_service_url: str = Field(
         default_factory=lambda: os.getenv("CURATION_ACTIVATION_URL", "http://localhost:8002"),
-        description="Base URL for the Curation Activation service",
     )
     pricing_multiplier: float = Field(
         default_factory=lambda: float(os.getenv("CURATION_PRICING_MULTIPLIER", "5")),
@@ -50,7 +47,4 @@ class CurationConnectionConfig(BaseConnectionConfig):
         le=5000,
         description="Safety cap on the number of sales fetched in a single get_media_buys call",
     )
-    http_timeout_seconds: float = Field(
-        default=30.0,
-        description="HTTP request timeout for curation service calls",
-    )
+    http_timeout_seconds: float = Field(default=30.0)
