@@ -66,20 +66,34 @@ def check_url_ssrf(url: str, *, require_https: bool = False) -> tuple[bool, str]
         if hostname.lower() in BLOCKED_HOSTNAMES:
             return False, f"URL hostname '{hostname}' is blocked (internal/private)"
 
+        # Resolve EVERY address family the hostname returns (IPv4 + IPv6).
+        # `gethostbyname` returns only a single IPv4 address, which would let
+        # a hostname with a public IPv4 and a private IPv6 bypass the check.
         try:
-            ip_str = socket.gethostbyname(hostname)
-            ip = ipaddress.ip_address(ip_str)
+            infos = socket.getaddrinfo(hostname, None)
         except socket.gaierror:
             return False, f"Cannot resolve hostname: {hostname}"
-        except ValueError as e:
-            return False, f"Invalid IP address from hostname resolution: {e}"
 
-        for network in BLOCKED_NETWORKS:
-            if ip in network:
-                return False, f"URL resolves to blocked IP range {network} (private/internal network)"
+        for info in infos:
+            addr = info[4][0]
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
 
-        if ip.is_loopback or ip.is_link_local or ip.is_private:
-            return False, f"URL resolves to private/internal IP address: {ip}"
+            for network in BLOCKED_NETWORKS:
+                if ip in network:
+                    return False, f"URL resolves to blocked IP range {network} (private/internal network)"
+
+            if (
+                ip.is_loopback
+                or ip.is_link_local
+                or ip.is_private
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                return False, f"URL resolves to non-routable IP address: {ip}"
 
         return True, ""
 

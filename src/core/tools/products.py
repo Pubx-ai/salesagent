@@ -382,16 +382,13 @@ async def _get_products_impl(
             details={"error_code": "POLICY_VIOLATION"},
         )
 
-    # Resolve adapter type for delivery_measurement defaults
-    ad_server_config = tenant.get("ad_server", {})
-    tenant_adapter_type = (
-        ad_server_config.get("adapter", "mock") if isinstance(ad_server_config, dict) else ad_server_config
-    )
+    from src.core.helpers.adapter_helpers import _coerce_adapter_type, adapter_manages_own_persistence
+
+    tenant_adapter_type = _coerce_adapter_type(tenant.get("ad_server"))
 
     # Check if the adapter provides its own product catalog (e.g. CurationAdapter).
     # Uses registry class attribute check to avoid unnecessary adapter instantiation.
     adapter_products = None
-    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
 
     if principal and getattr(principal, "principal_id", None) and adapter_manages_own_persistence(tenant):
         from src.core.exceptions import AdCPAdapterError
@@ -672,15 +669,7 @@ async def _get_products_impl(
                     if not product_channels.intersection(request_channels):
                         continue
                 else:
-                    # Product has no channels - use adapter defaults
-                    # Get adapter type from tenant config
-                    ad_server_config = tenant.get("ad_server", {})
-                    adapter_type = (
-                        ad_server_config.get("adapter", "mock")
-                        if isinstance(ad_server_config, dict)
-                        else ad_server_config
-                    )
-                    adapter_channels = get_adapter_default_channels(adapter_type)
+                    adapter_channels = get_adapter_default_channels(tenant_adapter_type)
 
                     # Product matches if any of adapter's default channels is in request
                     if adapter_channels and not request_channels.intersection(set(adapter_channels)):

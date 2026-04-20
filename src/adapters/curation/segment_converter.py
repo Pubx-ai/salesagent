@@ -27,12 +27,12 @@ from adcp.types.generated_poc.core.pricing_option import PricingOption
 from adcp.types.generated_poc.core.publisher_property_selector import PublisherPropertySelector
 from adcp.types.generated_poc.pricing_options.price_guidance import PriceGuidance
 
+from src.core.format_cache import DEFAULT_AGENT_URL
 from src.core.schemas.product import Product
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PUBLISHER_DOMAIN = "pubx.ai"
-DEFAULT_AGENT_URL = "https://creative.adcontextprotocol.org"
 
 # Maps platform values from CEL rules to AdCP device_type values
 _PLATFORM_TO_DEVICE: dict[str, str] = {

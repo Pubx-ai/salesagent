@@ -1,10 +1,8 @@
 """Adapters management blueprint."""
 
-import ipaddress
 import logging
-import socket
-from urllib.parse import urlparse
 
+import httpx
 from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -15,55 +13,11 @@ from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
 from src.core.database.models import AdapterConfig, Product
+from src.core.security.url_validator import check_url_ssrf
 
 logger = logging.getLogger(__name__)
 
 
-def _validate_external_url(url: str, *, label: str) -> str | None:
-    """Validate a user-supplied URL is safe to fetch from a server-side admin endpoint.
-
-    Returns an error message string if the URL is unsafe, or None if it's acceptable.
-    Blocks non-http(s) schemes, hostnames that resolve to private/loopback/link-local
-    addresses, and bare IP literals targeting metadata/internal ranges. This guards
-    the admin connection-test endpoint against SSRF.
-    """
-    try:
-        parsed = urlparse(url)
-    except (ValueError, TypeError):
-        return f"{label}: invalid URL"
-
-    if parsed.scheme not in {"http", "https"}:
-        return f"{label}: only http(s) URLs are allowed"
-
-    host = parsed.hostname
-    if not host:
-        return f"{label}: missing hostname"
-
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return f"{label}: hostname could not be resolved"
-
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            return f"{label}: hostname resolves to a non-routable address"
-
-    return None
-
-
-# Create blueprint
 adapters_bp = Blueprint("adapters", __name__)
 
 
@@ -378,16 +332,15 @@ def test_curation_connection(tenant_id, **kwargs):
         ):
             if not url:
                 continue
-            err = _validate_external_url(url, label=label)
-            if err:
+            is_safe, ssrf_error = check_url_ssrf(url)
+            if not is_safe:
+                err = f"{label}: {ssrf_error}"
                 logger.warning(
                     "Curation connection test rejected for tenant_id=%s: %s",
                     tenant_id,
                     err,
                 )
                 return jsonify({"success": False, "error": err}), 400
-
-        import httpx
 
         results: dict = {}
         segment_count: int | None = None
