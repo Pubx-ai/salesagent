@@ -11,7 +11,7 @@ Handles media buy creation including:
 import logging
 import time
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from urllib.parse import urlparse
 
@@ -174,7 +174,13 @@ def _build_packages_for_external_adapter(req: CreateMediaBuyRequest) -> list[Med
 
 
 def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime]:
-    """Extract and validate start/end times from a CreateMediaBuyRequest."""
+    """Extract and validate start/end times from a CreateMediaBuyRequest.
+
+    Both ``start_time`` and ``end_time`` are required by the AdCP schema. We
+    validate ``end_time`` explicitly here so callers see a clear validation
+    error instead of having the function silently default to ``start + 30
+    days`` (which other code paths already raise on).
+    """
     now = datetime.now(UTC)
 
     raw_start = req.start_time.root if req.start_time else "asap"
@@ -189,7 +195,9 @@ def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime
     if start.tzinfo is None:
         start = start.replace(tzinfo=UTC)
 
-    end = req.end_time if req.end_time else start + timedelta(days=30)
+    if req.end_time is None:
+        raise AdCPValidationError("end_time is required on CreateMediaBuyRequest")
+    end = req.end_time
     if end.tzinfo is None:
         end = end.replace(tzinfo=UTC)
 
@@ -225,13 +233,6 @@ def _build_package_pricing_info(req: CreateMediaBuyRequest) -> dict[str, dict[st
             "pricing_option_id": pricing_option_id,
         }
     return result
-
-
-def _adapter_manages_own_persistence(tenant: dict[str, Any]) -> bool:
-    """Delegate to shared helper in adapter_helpers."""
-    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
-
-    return adapter_manages_own_persistence(tenant)
 
 
 # NOTE: _sanitize_package_status() removed in adcp 2.12.0 migration
@@ -1432,9 +1433,20 @@ async def _create_media_buy_impl(
     # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
     # These adapters bypass Postgres entirely -- no setup validation, no buyer_ref dedup,
     # no workflow steps, no ORM creation. The adapter handles the full lifecycle.
-    manages_own_persistence = _adapter_manages_own_persistence(tenant)
+    from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
+
+    manages_own_persistence = adapter_manages_own_persistence(tenant)
 
     if manages_own_persistence:
+        # Apply request-level invariants that hold regardless of adapter so the
+        # curation path doesn't accept malformed requests the Postgres path
+        # would reject. These are the minimum cross-adapter checks; richer
+        # validation lives downstream and runs after the early return.
+        if not req.packages:
+            raise AdCPValidationError("CreateMediaBuyRequest.packages must contain at least one package")
+        if not req.buyer_ref:
+            raise AdCPValidationError("CreateMediaBuyRequest.buyer_ref is required")
+
         try:
             ext_adapter = get_adapter(
                 principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant
@@ -1450,6 +1462,12 @@ async def _create_media_buy_impl(
                 else AdcpTaskStatus.failed.value
             )
             return CreateMediaBuyResult(response=response, status=status)
+        except AdCPError:
+            # Preserve typed AdCP errors (validation, not-found, auth, …) so the
+            # transport layer maps them to the right status code/recovery hint
+            # instead of flattening everything into a generic adapter error.
+            logger.exception("External adapter create_media_buy raised typed AdCPError")
+            raise
         except Exception as e:
             logger.exception("External adapter create_media_buy failed")
             raise AdCPAdapterError(f"Adapter error: {e}") from e

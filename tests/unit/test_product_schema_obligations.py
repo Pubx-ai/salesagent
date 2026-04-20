@@ -29,7 +29,7 @@ CONFIRMED (57 tests) — Schema fields, required/optional, types, XOR constraint
 UNSPECIFIED (28 tests) — Implementation-defined, not in AdCP spec:
   Access control (allowed_principal_ids, anonymous discovery, pricing suppression)
   Product conversion (DB→schema, ValueError on failure, roundtrip)
-  Publisher domain sorting, product uniqueness, relevance threshold 0.1
+  Publisher domain sorting, product uniqueness, relevance threshold 0.3
   Error response schemas (policy, auth)
   Offering text derivation from brand name/url
 
@@ -1742,7 +1742,7 @@ class TestRelevanceThresholdSchema:
     """AI ranking threshold filter behavior at schema level."""
 
     async def test_threshold_boundary_included(self):
-        """Score exactly at threshold (0.1) is included.
+        """Score exactly at threshold (0.3) is included.
 
         Covers: CONSTR-RELEVANCE-THRESHOLD-01
         """
@@ -1758,9 +1758,9 @@ class TestRelevanceThresholdSchema:
             mock_factory.create_model.return_value = MagicMock()
             env.mock["ranking_factory"].return_value = mock_factory
 
-            # Mock ranking to return score exactly at threshold (0.1)
+            # Mock ranking to return score exactly at threshold (0.3)
             mock_result = MagicMock()
-            mock_result.rankings = [MagicMock(product_id="prod_boundary", relevance_score=0.1, reason="ok")]
+            mock_result.rankings = [MagicMock(product_id="prod_boundary", relevance_score=0.3, reason="ok")]
 
             with (
                 patch(
@@ -1773,10 +1773,10 @@ class TestRelevanceThresholdSchema:
                 response = await env.call_impl(brief="test")
 
             product_ids = [p.product_id for p in response.products]
-            assert "prod_boundary" in product_ids, "Score at threshold (0.1) should be included"
+            assert "prod_boundary" in product_ids, "Score at threshold (0.3) should be included"
 
     async def test_threshold_below_excluded(self):
-        """Score below threshold (0.09) is excluded.
+        """Score below threshold (0.29) is excluded.
 
         Covers: CONSTR-RELEVANCE-THRESHOLD-01
         """
@@ -1796,7 +1796,7 @@ class TestRelevanceThresholdSchema:
             # Mock ranking: one below threshold, one above
             mock_result = MagicMock()
             mock_result.rankings = [
-                MagicMock(product_id="prod_low", relevance_score=0.09, reason="too low"),
+                MagicMock(product_id="prod_low", relevance_score=0.29, reason="too low"),
                 MagicMock(product_id="prod_high", relevance_score=0.5, reason="ok"),
             ]
 
@@ -1812,7 +1812,7 @@ class TestRelevanceThresholdSchema:
 
             product_ids = [p.product_id for p in response.products]
             assert "prod_high" in product_ids, "Score above threshold included"
-            assert "prod_low" not in product_ids, "Score below threshold (0.09) excluded"
+            assert "prod_low" not in product_ids, "Score below threshold (0.29) excluded"
 
     def test_no_ranking_means_no_threshold(self):
         """Without ranking active, all products pass (no threshold applied).

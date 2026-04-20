@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from src.adapters import get_adapter_default_channels
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import get_principal_object
-from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import create_get_products_request
 from src.core.schemas import (
@@ -394,13 +394,26 @@ async def _get_products_impl(
     from src.core.helpers.adapter_helpers import adapter_manages_own_persistence
 
     if principal and getattr(principal, "principal_id", None) and adapter_manages_own_persistence(tenant):
-        try:
-            from src.core.helpers.adapter_helpers import get_adapter
+        from src.core.exceptions import AdCPAdapterError
+        from src.core.helpers.adapter_helpers import get_adapter
 
+        try:
             adapter_instance = get_adapter(principal, dry_run=True, tenant=tenant)
             adapter_products = adapter_instance.get_product_catalog(tenant["tenant_id"])
-        except Exception:
-            logger.exception("[GET_PRODUCTS] Adapter product catalog fetch failed for tenant %s", tenant["tenant_id"])
+        except AdCPError:
+            # Surface typed AdCP errors as-is (e.g. validation, not-found).
+            raise
+        except Exception as e:
+            # Adapters that manage their own persistence are the authoritative
+            # source of products for this tenant — silently falling back to an
+            # empty Postgres catalog would hide the outage from the caller.
+            # Convert to a typed adapter error so the transport layer maps to
+            # 502 ADAPTER_ERROR with a transient recovery hint.
+            logger.exception(
+                "[GET_PRODUCTS] Adapter product catalog fetch failed for tenant %s",
+                tenant["tenant_id"],
+            )
+            raise AdCPAdapterError(f"Adapter product catalog fetch failed for tenant {tenant['tenant_id']}: {e}") from e
 
     if adapter_products is not None:
         products = adapter_products
@@ -775,8 +788,10 @@ async def _get_products_impl(
                     reverse=True,
                 )
 
-                # Filter out products with very low relevance (score < 0.1)
-                eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.1]
+                # Filter out products below the relevance threshold advertised in the
+                # ranking prompt (>= 0.3). Keeping a lower bar here would surface
+                # weakly-matching products the AI was instructed to omit.
+                eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.3]
 
                 # Write ranking results back to product objects
                 for product in eligible_products:
@@ -801,14 +816,26 @@ async def _get_products_impl(
                         recovery="terminal",
                     )
                 logger.debug("[GET_PRODUCTS] AI ranking configured but AI not enabled (no API key)")
-        except AdCPValidationError:
+        except AdCPError:
+            # Preserve typed AdCP errors (validation, not-found, …) — let the
+            # transport boundary translate them to the right HTTP/MCP code.
             raise
-        except (ImportError, RuntimeError, OSError) as e:
+        except (TypeError, AttributeError, NameError, AssertionError):
+            # Programming bugs must always propagate so they're caught in
+            # tests / observability rather than masked as a degraded ranking.
+            raise
+        except Exception as e:
+            # Catch the long tail of network/auth/parsing/SDK failures from the
+            # AI provider (httpx errors, JSONDecodeError, model errors, …) so a
+            # single hiccup doesn't crash the entire get_products call.
+            # Curation tenants depend on AI ranking — turn the failure into a
+            # typed adapter error so the caller can retry. Non-curation
+            # tenants log and fall back to the unranked list.
             if adapter_manages_own_persistence(tenant):
                 from src.core.exceptions import AdCPAdapterError
 
                 raise AdCPAdapterError(f"AI ranking failed for curation tenant: {e}") from e
-            logger.warning(f"Failed to apply AI product ranking: {e}. Returning unranked products.")
+            logger.warning("Failed to apply AI product ranking: %s. Returning unranked products.", e)
 
     # Annotate pricing options with adapter support (AdCP PR #88)
     # Do this BEFORE serialization to avoid reconstruction issues
