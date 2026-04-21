@@ -719,7 +719,7 @@ class TestAdapterManagesOwnPersistence:
 
 class TestHelperFunctions:
     def test_extract_pricing_defaults(self):
-        from src.adapters.curation.adapter import _extract_pricing
+        from src.adapters.curation._helpers import _extract_pricing
 
         result = _extract_pricing(None)
         assert result["currency"] == "USD"
@@ -729,7 +729,7 @@ class TestHelperFunctions:
         assert result["fixed_price"] is None
 
     def test_extract_pricing_from_info(self):
-        from src.adapters.curation.adapter import _extract_pricing
+        from src.adapters.curation._helpers import _extract_pricing
 
         info = {"pkg_1": {"currency": "EUR", "rate": 2.5, "is_fixed": False, "bid_price": 2.5}}
         result = _extract_pricing(info)
@@ -737,7 +737,7 @@ class TestHelperFunctions:
         assert result["floor_price"] == 2.5
 
     def test_extract_dsps_from_ext_returns_none_when_absent(self):
-        from src.adapters.curation.adapter import _extract_dsps_from_ext
+        from src.adapters.curation._helpers import _extract_dsps_from_ext
 
         req = MagicMock()
         req.ext = None
@@ -745,7 +745,7 @@ class TestHelperFunctions:
         assert result is None
 
     def test_extract_dsps_from_ext_returns_list_when_present(self):
-        from src.adapters.curation.adapter import _extract_dsps_from_ext
+        from src.adapters.curation._helpers import _extract_dsps_from_ext
 
         req = MagicMock()
         req.ext = {"dsps": [{"seat_id": "SA-123", "dsp_name": "StackAdapt"}]}
@@ -1826,7 +1826,7 @@ class TestBuildCreativeAssignments:
 
     def test_snippet_mapped_to_tag(self):
         """Creative with snippet and no tag → result has tag from snippet."""
-        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.adapters.curation._helpers import _build_creative_assignments
         from src.core.schemas import MediaPackage
 
         creative = MagicMock()
@@ -1852,7 +1852,7 @@ class TestBuildCreativeAssignments:
 
     def test_tag_field_takes_precedence_over_snippet(self):
         """Creative with both tag and snippet → tag wins."""
-        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.adapters.curation._helpers import _build_creative_assignments
         from src.core.schemas import MediaPackage
 
         creative = MagicMock()
@@ -1878,7 +1878,7 @@ class TestBuildCreativeAssignments:
 
     def test_no_creatives_returns_empty(self):
         """No creatives on either pkg or orig_pkg → empty list."""
-        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.adapters.curation._helpers import _build_creative_assignments
         from src.core.schemas import MediaPackage
 
         pkg = MagicMock(spec=MediaPackage)
@@ -1893,7 +1893,7 @@ class TestBuildCreativeAssignments:
 
     def test_snippet_type_passed_through(self):
         """Creative with snippet_type → result includes snippet_type."""
-        from src.adapters.curation.adapter import _build_creative_assignments
+        from src.adapters.curation._helpers import _build_creative_assignments
         from src.core.schemas import MediaPackage
 
         creative = MagicMock()
