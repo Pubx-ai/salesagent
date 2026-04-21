@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import attributes
 
-from src.adapters import get_adapter_schemas
+from src.adapters import ADAPTER_REGISTRY, get_adapter_schemas
 from src.admin.utils import require_tenant_access
 from src.admin.utils.audit_decorator import log_admin_action
 from src.core.database.database_session import get_db_session
@@ -202,8 +202,6 @@ def save_adapter_config(tenant_id, **kwargs):
 
         # Fire the adapter's post-save hook. Curation uses this to seed
         # tenant.product_ranking_prompt; other adapters inherit a no-op base.
-        from src.adapters import ADAPTER_REGISTRY
-
         adapter_class = ADAPTER_REGISTRY.get(adapter_type)
         if adapter_class is not None:
             try:
