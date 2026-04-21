@@ -171,6 +171,31 @@ class DailyBreakdown(SalesAgentBaseModel):
     spend: float = Field(ge=0, description="Daily spend")
 
 
+# FIXME(salesagent-jz3y): Library uses Status enum with ``pending_activation``
+# where salesagent uses ``ready``. This map translates AdCP spec status values
+# to the internal Literal that MediaBuyDeliveryData.status accepts. Adapters
+# whose upstream services use AdCP vocabulary (e.g. curation) route through
+# this map when building MediaBuyDeliveryData; once we align naming to spec,
+# this translation and the MediaBuyDeliveryData.status FIXME below go away.
+_ADCP_TO_INTERNAL_STATUS: dict[str, str] = {
+    "pending_activation": "ready",
+    "pending_creative": "ready",
+    "pending_manual": "ready",
+    "scheduled": "ready",
+}
+
+
+def adcp_to_internal_status(adcp_status: str) -> str:
+    """Translate an AdCP spec status value to the internal Literal used by
+    :class:`MediaBuyDeliveryData.status`.
+
+    Unknown statuses pass through unchanged so Pydantic validation surfaces
+    them clearly — the mapping is explicitly for bridging known-pending
+    vocabulary, not a silent catch-all.
+    """
+    return _ADCP_TO_INTERNAL_STATUS.get(adcp_status, adcp_status)
+
+
 class MediaBuyDeliveryData(SalesAgentBaseModel):
     """AdCP-compliant delivery data for a single media buy.
 

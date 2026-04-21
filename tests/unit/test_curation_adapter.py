@@ -2241,3 +2241,37 @@ class TestCurationAdapterCreateMediaBuyForTool:
         assert call_args.args[0] is req
         assert len(call_args.args[1]) == 1
         assert call_args.args[1][0].product_id == "p1"
+
+
+class TestAdcpToInternalStatus:
+    """The adcp_to_internal_status helper bridges AdCP status vocabulary to
+    the internal MediaBuyDeliveryData.status Literal. Lives on the schema
+    module next to the FIXME(salesagent-jz3y) that will eventually retire it.
+    """
+
+    def test_pending_activation_maps_to_ready(self):
+        from src.core.schemas.delivery import adcp_to_internal_status
+
+        assert adcp_to_internal_status("pending_activation") == "ready"
+
+    def test_all_pending_variants_map_to_ready(self):
+        from src.core.schemas.delivery import adcp_to_internal_status
+
+        assert adcp_to_internal_status("pending_creative") == "ready"
+        assert adcp_to_internal_status("pending_manual") == "ready"
+        assert adcp_to_internal_status("scheduled") == "ready"
+
+    def test_known_internal_values_pass_through(self):
+        """active/paused/completed/failed/reporting_delayed are already the
+        internal vocabulary — the map is a no-op for them."""
+        from src.core.schemas.delivery import adcp_to_internal_status
+
+        for s in ("active", "paused", "completed", "failed", "reporting_delayed"):
+            assert adcp_to_internal_status(s) == s
+
+    def test_unknown_passes_through_unchanged(self):
+        """Unknown values pass through so Pydantic surfaces them, rather
+        than silently mapping to a wrong Literal."""
+        from src.core.schemas.delivery import adcp_to_internal_status
+
+        assert adcp_to_internal_status("made_up_status") == "made_up_status"
