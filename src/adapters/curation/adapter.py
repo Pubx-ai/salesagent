@@ -105,6 +105,12 @@ class CurationAdapter(ToolProvider):
     adapter_name = "curation"
     manages_own_persistence = True
 
+    # Widened from the base class ``principal: Principal`` — curation supports
+    # anonymous callers (public product catalog) because the external catalog,
+    # not the principal, is the source of truth. CurationAdapter never reads
+    # ``self.principal`` in any method.
+    principal: Principal | None  # type: ignore[assignment]
+
     @classmethod
     def on_config_saved(cls, tenant_id: str) -> None:
         """Seed ``tenant.product_ranking_prompt`` with the curation default.
@@ -153,7 +159,7 @@ class CurationAdapter(ToolProvider):
     def __init__(
         self,
         config: dict[str, Any],
-        principal: Principal,
+        principal: Principal | None,
         dry_run: bool = False,
         creative_engine: Any = None,
         tenant_id: str | None = None,

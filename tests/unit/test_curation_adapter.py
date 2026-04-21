@@ -2275,3 +2275,79 @@ class TestAdcpToInternalStatus:
         from src.core.schemas.delivery import adcp_to_internal_status
 
         assert adcp_to_internal_status("made_up_status") == "made_up_status"
+
+
+class TestAnonymousCurationGetProducts:
+    """Anonymous (unauthenticated) get_products against a curation tenant
+    must still consult the external catalog — not fall back to Postgres.
+
+    Regression for CodeRabbit PR #1 comment 3111057247 / bd salesagent-fml.
+    """
+
+    def test_curation_adapter_accepts_none_principal(self):
+        """CurationAdapter.__init__ accepts principal=None without raising."""
+        from src.adapters.curation.adapter import CurationAdapter
+
+        adapter = CurationAdapter(
+            config={
+                "catalog_service_url": "http://catalog.example",
+                "sales_service_url": "http://sales.example",
+                "activation_service_url": "http://activation.example",
+            },
+            principal=None,
+            dry_run=True,
+            tenant_id="t1",
+        )
+        assert adapter.principal is None
+        assert adapter.tenant_id == "t1"
+
+    def test_get_adapter_accepts_none_principal_for_curation(self):
+        """get_adapter returns a CurationAdapter when principal is None
+        and the tenant's adapter_type is curation."""
+        from unittest.mock import MagicMock, patch
+
+        from src.adapters.curation.adapter import CurationAdapter
+        from src.core.helpers.adapter_helpers import get_adapter
+
+        tenant = {"tenant_id": "t1", "ad_server": "curation"}
+
+        mock_session = MagicMock()
+        mock_config_row = MagicMock()
+        mock_config_row.adapter_type = "curation"
+        mock_config_row.config_json = {
+            "catalog_service_url": "http://catalog.example",
+            "sales_service_url": "http://sales.example",
+            "activation_service_url": "http://activation.example",
+        }
+        mock_session.scalars.return_value.first.return_value = mock_config_row
+
+        with patch("src.core.helpers.adapter_helpers.get_db_session") as mock_get_session:
+            mock_get_session.return_value.__enter__.return_value = mock_session
+            mock_get_session.return_value.__exit__.return_value = False
+
+            adapter = get_adapter(principal=None, dry_run=True, tenant=tenant)
+
+        assert isinstance(adapter, CurationAdapter)
+
+    def test_get_adapter_raises_on_gam_with_none_principal(self):
+        """get_adapter must reject None principal for adapters that need it."""
+        from unittest.mock import MagicMock, patch
+
+        import pytest
+
+        from src.core.exceptions import AdCPAuthenticationError
+        from src.core.helpers.adapter_helpers import get_adapter
+
+        tenant = {"tenant_id": "t1", "ad_server": "google_ad_manager"}
+
+        mock_session = MagicMock()
+        mock_config_row = MagicMock()
+        mock_config_row.adapter_type = "google_ad_manager"
+        mock_session.scalars.return_value.first.return_value = mock_config_row
+
+        with patch("src.core.helpers.adapter_helpers.get_db_session") as mock_get_session:
+            mock_get_session.return_value.__enter__.return_value = mock_session
+            mock_get_session.return_value.__exit__.return_value = False
+
+            with pytest.raises(AdCPAuthenticationError, match="advertiser"):
+                get_adapter(principal=None, dry_run=True, tenant=tenant)

@@ -339,9 +339,13 @@ async def _get_products_impl(
 
     # Check if the adapter provides its own product catalog (e.g. CurationAdapter).
     # Uses registry class attribute check to avoid unnecessary adapter instantiation.
+    # Runs for both authenticated and anonymous callers — the external catalog
+    # is the source of truth for curation tenants regardless of auth state.
+    # Adapters that require a principal (e.g. GAM) raise AdCPAuthenticationError
+    # from get_adapter() when principal is None.
     adapter_products = None
 
-    if principal and getattr(principal, "principal_id", None) and adapter_manages_own_persistence(tenant):
+    if adapter_manages_own_persistence(tenant):
         from src.core.exceptions import AdCPAdapterError
         from src.core.helpers.adapter_helpers import get_adapter
 
