@@ -1384,16 +1384,11 @@ async def _create_media_buy_impl(
         )
 
     # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
-    # Tool-shaped logic lives on the adapter; core just dispatches.
+    # Tool-shaped logic lives on the adapter; the base class raises
+    # NotImplementedError if the adapter opts into persistence without
+    # implementing this tool-shaped method.
     if adapter_manages_own_persistence(tenant):
         ext_adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
-        from src.adapters.curation.adapter import CurationAdapter
-
-        if not isinstance(ext_adapter, CurationAdapter):
-            raise AdCPAdapterError(
-                f"Adapter {type(ext_adapter).__name__} declares manages_own_persistence=True "
-                f"but does not subclass CurationAdapter; cannot dispatch create_media_buy"
-            )
         try:
             # create_media_buy_for_tool internally calls the adapter's sync
             # create_media_buy; offload to a thread so this coroutine yields

@@ -61,7 +61,7 @@ from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
 from src.core.auth import get_principal_object
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
-from src.core.exceptions import AdCPAdapterError, AdCPAuthenticationError, AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
 from src.core.helpers.adapter_helpers import adapter_manages_own_persistence, get_adapter
 from src.core.schemas import (
     ApprovalStatus,
@@ -122,7 +122,9 @@ def _get_media_buys_impl(
     tenant_id: str = tenant["tenant_id"]
 
     # Adapters with manages_own_persistence=True bypass Postgres entirely.
-    # Tool-shaped logic lives on the adapter; core just dispatches.
+    # Tool-shaped logic lives on the adapter; the base class raises
+    # NotImplementedError if the adapter opts into persistence without
+    # implementing this tool-shaped method.
     if adapter_manages_own_persistence(tenant):
         adapter = get_adapter(
             principal,
@@ -130,13 +132,6 @@ def _get_media_buys_impl(
             testing_context=testing_ctx,
             tenant=tenant,
         )
-        from src.adapters.curation.adapter import CurationAdapter
-
-        if not isinstance(adapter, CurationAdapter):
-            raise AdCPAdapterError(
-                f"Adapter {type(adapter).__name__} declares manages_own_persistence=True "
-                f"but does not subclass CurationAdapter; cannot dispatch get_media_buys"
-            )
         return adapter.get_media_buys_for_tool(req, include_snapshot=include_snapshot)
 
     # Single DB session for all reads — ORM objects are converted to plain

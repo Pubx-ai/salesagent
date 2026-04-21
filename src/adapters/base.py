@@ -6,7 +6,17 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    from src.core.schemas import Snapshot, Targeting
+    from src.core.schemas import (
+        CreateMediaBuyResult,
+        GetMediaBuyDeliveryRequest,
+        GetMediaBuyDeliveryResponse,
+        GetMediaBuysRequest,
+        GetMediaBuysResponse,
+        Snapshot,
+        Targeting,
+    )
+    from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+    from src.core.testing_hooks import AdCPTestContext
 
 from adcp.types.aliases import Package as ResponsePackage
 from pydantic import BaseModel, ConfigDict, Field
@@ -309,6 +319,54 @@ class ToolProvider(ABC):
         the overrider's responsibility.
         """
         return None
+
+    def get_delivery_for_tool(
+        self,
+        req: GetMediaBuyDeliveryRequest,
+        reporting_period: MediaBuyReportingPeriod,
+    ) -> GetMediaBuyDeliveryResponse:
+        """Tool-shaped delivery entry for media_buy_delivery.
+
+        Override on adapters with ``manages_own_persistence=True`` that need
+        to bypass Postgres. Called from ``_get_media_buy_delivery_impl`` when
+        the adapter owns persistence. Default raises NotImplementedError so
+        adapters that opt into ``manages_own_persistence`` without a full
+        tool-shaped implementation fail loudly instead of silently.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares manages_own_persistence=True but does "
+            f"not implement get_delivery_for_tool(); cannot dispatch get_media_buy_delivery."
+        )
+
+    def get_media_buys_for_tool(
+        self,
+        req: GetMediaBuysRequest,
+        include_snapshot: bool,
+    ) -> GetMediaBuysResponse:
+        """Tool-shaped list entry for media_buy_list.
+
+        Override on adapters with ``manages_own_persistence=True``. Default
+        raises NotImplementedError so misconfigured adapters fail loudly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares manages_own_persistence=True but does "
+            f"not implement get_media_buys_for_tool(); cannot dispatch get_media_buys."
+        )
+
+    def create_media_buy_for_tool(
+        self,
+        req: CreateMediaBuyRequest,
+        testing_ctx: AdCPTestContext | None,
+    ) -> CreateMediaBuyResult:
+        """Tool-shaped create entry for media_buy_create.
+
+        Override on adapters with ``manages_own_persistence=True``. Default
+        raises NotImplementedError so misconfigured adapters fail loudly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares manages_own_persistence=True but does "
+            f"not implement create_media_buy_for_tool(); cannot dispatch create_media_buy."
+        )
 
 
 class AdServerAdapter(ToolProvider):

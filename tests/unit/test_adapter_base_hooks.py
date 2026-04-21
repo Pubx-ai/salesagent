@@ -38,3 +38,42 @@ class TestOnConfigSavedDefault:
             def update_media_buy_performance_index(self, *a, **kw): ...
 
         assert Dummy.on_config_saved("any_tenant") is None
+
+
+class TestToolForMethodDefaults:
+    """Base ToolProvider's *_for_tool methods raise NotImplementedError by
+    default. Adapters that set manages_own_persistence=True MUST override
+    them; the message helps operators debug misconfigured new adapters."""
+
+    def _make_dummy(self):
+        class Dummy(ToolProvider):
+            adapter_name = "dummy"
+
+            def create_media_buy(self, *a, **kw): ...
+            def check_media_buy_status(self, *a, **kw): ...
+            def get_media_buy_delivery(self, *a, **kw): ...
+            def update_media_buy(self, *a, **kw): ...
+            def update_media_buy_performance_index(self, *a, **kw): ...
+
+        return Dummy
+
+    def test_get_delivery_for_tool_raises_with_class_name(self):
+        import pytest
+
+        Dummy = self._make_dummy()
+        with pytest.raises(NotImplementedError, match="Dummy"):
+            Dummy().get_delivery_for_tool(None, None)  # type: ignore[arg-type]
+
+    def test_get_media_buys_for_tool_raises_with_class_name(self):
+        import pytest
+
+        Dummy = self._make_dummy()
+        with pytest.raises(NotImplementedError, match="Dummy"):
+            Dummy().get_media_buys_for_tool(None, include_snapshot=False)  # type: ignore[arg-type]
+
+    def test_create_media_buy_for_tool_raises_with_class_name(self):
+        import pytest
+
+        Dummy = self._make_dummy()
+        with pytest.raises(NotImplementedError, match="Dummy"):
+            Dummy().create_media_buy_for_tool(None, testing_ctx=None)  # type: ignore[arg-type]

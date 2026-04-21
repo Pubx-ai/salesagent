@@ -497,10 +497,9 @@ class TestGetMediaBuysCurationEarlyReturn:
     """When adapter_manages_own_persistence is True, _impl delegates to
     adapter.get_media_buys_for_tool() instead of querying Postgres.
 
-    Dispatch requires isinstance(adapter, CurationAdapter), so these tests
-    stub a real CurationAdapter (cheap to construct -- no network calls at
-    init) and override list_media_buys to assert the translation that
-    get_media_buys_for_tool performs.
+    These tests stub a real CurationAdapter (cheap to construct -- no
+    network calls at init) and override list_media_buys to assert the
+    translation that get_media_buys_for_tool performs.
     """
 
     def _make_identity(self):
