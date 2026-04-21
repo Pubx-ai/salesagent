@@ -145,6 +145,114 @@ class TestBlockedHostnames:
         assert "169.254.169.254" in BLOCKED_HOSTNAMES
 
 
+class TestSsrfAllowlist:
+    """SSRF_ALLOWED_HOSTS / SSRF_ALLOWED_HOST_SUFFIXES carve narrow exceptions."""
+
+    def test_exact_host_match_bypasses_private_ip_check(self, monkeypatch):
+        """Allowlisted hostname skips the BLOCKED_NETWORKS check even when it
+        would otherwise resolve into 10.0.0.0/8."""
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", "sales-service.seller.local")
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        # getaddrinfo must not even be consulted once the allowlist hits.
+        is_safe, error = check_url_ssrf("http://sales-service.seller.local:8000")
+        assert is_safe is True
+        assert error == ""
+
+    def test_exact_host_match_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", "Sales-Service.Seller.Local")
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        is_safe, error = check_url_ssrf("http://SALES-SERVICE.seller.LOCAL:8000/api")
+        assert is_safe is True
+        assert error == ""
+
+    def test_multiple_exact_hosts_comma_separated(self, monkeypatch):
+        monkeypatch.setenv(
+            "SSRF_ALLOWED_HOSTS",
+            "catalog.seller.local,sales-service.seller.local,activation.seller.local",
+        )
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        for host in ("catalog.seller.local", "sales-service.seller.local", "activation.seller.local"):
+            is_safe, error = check_url_ssrf(f"http://{host}:8000/api")
+            assert is_safe is True, f"expected {host} to be allowed"
+            assert error == ""
+
+    def test_suffix_match_bypasses_private_ip_check(self, monkeypatch):
+        monkeypatch.delenv("SSRF_ALLOWED_HOSTS", raising=False)
+        monkeypatch.setenv("SSRF_ALLOWED_HOST_SUFFIXES", ".seller.local")
+        is_safe, error = check_url_ssrf("http://sales-service.seller.local:8000/api")
+        assert is_safe is True
+        assert error == ""
+
+    def test_multiple_suffixes_comma_separated(self, monkeypatch):
+        monkeypatch.delenv("SSRF_ALLOWED_HOSTS", raising=False)
+        monkeypatch.setenv("SSRF_ALLOWED_HOST_SUFFIXES", ".seller.local,.svc.cluster.local")
+        for host in ("a.seller.local", "b.svc.cluster.local"):
+            is_safe, error = check_url_ssrf(f"http://{host}:8000/api")
+            assert is_safe is True, f"expected {host} to be allowed"
+            assert error == ""
+
+    def test_suffix_does_not_match_sibling_domain(self, monkeypatch):
+        """Leading dot in the suffix prevents 'evilseller.local' from matching
+        when the operator meant '.seller.local'."""
+        monkeypatch.delenv("SSRF_ALLOWED_HOSTS", raising=False)
+        monkeypatch.setenv("SSRF_ALLOWED_HOST_SUFFIXES", ".seller.local")
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo",
+            return_value=[(0, 0, 0, "", ("10.1.2.3", 0))],
+        ):
+            is_safe, error = check_url_ssrf("http://evilseller.local:8000/api")
+        assert is_safe is False
+        assert "10.0.0.0/8" in error
+
+    def test_non_allowlisted_host_still_blocked(self, monkeypatch):
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", "sales-service.seller.local")
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo",
+            return_value=[(0, 0, 0, "", ("10.1.2.3", 0))],
+        ):
+            is_safe, error = check_url_ssrf("http://other.seller.local:8000/api")
+        assert is_safe is False
+        assert "10.0.0.0/8" in error
+
+    def test_allowlist_cannot_override_blocked_hostnames(self, monkeypatch):
+        """Literal cloud-metadata / localhost aliases in BLOCKED_HOSTNAMES must
+        remain rejected even if an operator lists them in SSRF_ALLOWED_HOSTS —
+        the block check runs first by design, so attacker-controlled operator
+        config cannot un-block metadata.google.internal."""
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", "metadata.google.internal,localhost")
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        for host in ("metadata.google.internal", "localhost"):
+            is_safe, error = check_url_ssrf(f"http://{host}/compute")
+            assert is_safe is False, f"expected {host} to remain blocked"
+            assert "blocked" in error.lower()
+
+    def test_scheme_still_validated_for_allowlisted_host(self, monkeypatch):
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", "sales-service.seller.local")
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        is_safe, error = check_url_ssrf("ftp://sales-service.seller.local/file")
+        assert is_safe is False
+        assert "http" in error.lower()
+
+    def test_empty_allowlist_defaults_to_block(self, monkeypatch):
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", "")
+        monkeypatch.setenv("SSRF_ALLOWED_HOST_SUFFIXES", "")
+        with patch(
+            "src.core.security.url_validator.socket.getaddrinfo",
+            return_value=[(0, 0, 0, "", ("10.1.2.3", 0))],
+        ):
+            is_safe, error = check_url_ssrf("http://sales-service.seller.local:8000/api")
+        assert is_safe is False
+        assert "10.0.0.0/8" in error
+
+    def test_whitespace_and_empty_entries_ignored(self, monkeypatch):
+        monkeypatch.setenv("SSRF_ALLOWED_HOSTS", " , ,sales-service.seller.local, ")
+        monkeypatch.delenv("SSRF_ALLOWED_HOST_SUFFIXES", raising=False)
+        is_safe, error = check_url_ssrf("http://sales-service.seller.local:8000/api")
+        assert is_safe is True
+        assert error == ""
+
+
 class TestValidateAgentUrl:
     """validate_agent_url in media_buy_create validates format only (scheme + netloc).
 
