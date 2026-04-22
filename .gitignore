@@ -1,4 +1,5 @@
 # Local configuration
+config/caddy/Caddyfile
 config.json
 __pycache__
 adcp.db
@@ -149,3 +150,16 @@ test-results/
 
 # One-off presentation drafts
 docs/TRANSFORMATION_PRESENTATION.md
+
+# Local-only working docs (superpowers plans/specs, curation scratchpad).
+# Kept on disk for local reference, but not tracked — this is intentional,
+# do not remove these entries without checking with the branch owner.
+docs/superpowers/
+docs/curation-todos.md
+
+# Cursor IDE hook state — per-machine scratchpad, not useful to other checkouts.
+.cursor/hooks/state/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key

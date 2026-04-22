@@ -385,6 +385,23 @@ class TestOidcCallbackCompatibility:
 
         assert redirect_uri.endswith("/auth/oidc/callback")
 
+    def test_get_tenant_redirect_uri_public_base_overrides_subdomain(self):
+        """Path-based routing: single host must not become {subdomain}.{domain}."""
+        from src.services.auth_config_service import get_tenant_redirect_uri
+
+        tenant = MagicMock()
+        tenant.virtual_host = None
+        tenant.subdomain = "default"
+
+        env = {
+            "SALES_AGENT_DOMAIN": "salesagent.staging.example.com",
+            "SALES_AGENT_PUBLIC_BASE_URL": "http://salesagent.staging.example.com",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            redirect_uri = get_tenant_redirect_uri(tenant)
+
+        assert redirect_uri == "http://salesagent.staging.example.com/admin/auth/oidc/callback"
+
 
 class TestA2ATrailingSlashCompatibility:
     """A2A trailing-slash requests should stay on the FastAPI surface."""

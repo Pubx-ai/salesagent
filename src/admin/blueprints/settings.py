@@ -536,6 +536,7 @@ def update_ai(tenant_id):
         model = request.form.get("ai_model", "").strip()
         api_key = request.form.get("ai_api_key", "").strip()
         logfire_token = request.form.get("logfire_token", "").strip()
+        fallback_models_raw = request.form.get("fallback_models", "").strip()
 
         with get_db_session() as db_session:
             tenant = db_session.scalars(select(Tenant).filter_by(tenant_id=tenant_id)).first()
@@ -564,6 +565,13 @@ def update_ai(tenant_id):
             # Preserve settings if they exist
             if existing_config.get("settings"):
                 new_config["settings"] = existing_config["settings"]
+
+            # Handle fallback models (Vercel AI Gateway)
+            # Empty submission intentionally clears the stored value — nothing is written to new_config.
+            if fallback_models_raw:
+                parsed = [m.strip() for m in fallback_models_raw.split(",") if m.strip()]
+                if parsed:
+                    new_config["fallback_models"] = parsed
 
             # Handle Logfire token: use new one if provided, otherwise keep existing
             # Skip placeholder value that indicates existing token
@@ -767,6 +775,10 @@ def get_ai_models(tenant_id):
     for provider in by_provider:
         by_provider[provider] = sorted(set(by_provider[provider]))
 
+    # Inject providers that won't appear in KnownModelName (dynamic model lists)
+    if "vercel" not in by_provider:
+        by_provider["vercel"] = []
+
     # Define provider metadata for UI
     provider_info = {
         "google-gla": {"name": "Google Gemini", "key_url": "https://aistudio.google.com/app/apikey"},
@@ -797,6 +809,12 @@ def get_ai_models(tenant_id):
             "gateway": True,
         },
         "gateway/groq": {"name": "Gateway: Groq", "key_url": "https://ai.pydantic.dev/gateway", "gateway": True},
+        # Vercel AI Gateway
+        "vercel": {
+            "name": "Vercel AI Gateway",
+            "key_url": "https://vercel.com/docs/ai-gateway",
+            "gateway": True,
+        },
     }
 
     # Build response with provider info

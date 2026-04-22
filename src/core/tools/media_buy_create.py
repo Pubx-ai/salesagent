@@ -8,6 +8,7 @@ Handles media buy creation including:
 - Budget validation
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -91,7 +92,7 @@ from src.core.database.models import MediaBuy
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
 from src.core.helpers import log_tool_activity
-from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.adapter_helpers import adapter_manages_own_persistence, get_adapter
 from src.core.helpers.creative_helpers import (
     _convert_creative_to_adapter_asset,
     extract_click_url,
@@ -122,12 +123,72 @@ from src.core.schemas import (
 from src.core.testing_hooks import AdCPTestContext, TestingContext, apply_testing_hooks
 from src.core.tool_context import ToolContext
 from src.core.tools.financial_validation import validate_max_daily_package_spend, validate_min_package_budget
-
-# Import get_product_catalog from main (after refactor)
 from src.core.validation_helpers import format_validation_error
 from src.services.activity_feed import activity_feed
 
 # --- Helper Functions ---
+
+
+def _parse_request_times(req: CreateMediaBuyRequest) -> tuple[datetime, datetime]:
+    """Extract and validate start/end times from a CreateMediaBuyRequest.
+
+    Both ``start_time`` and ``end_time`` are required by the AdCP schema. We
+    validate ``end_time`` explicitly here so callers see a clear validation
+    error instead of having the function silently default to ``start + 30
+    days`` (which other code paths already raise on).
+    """
+    now = datetime.now(UTC)
+
+    raw_start = req.start_time.root if req.start_time else "asap"
+    if raw_start == "asap":
+        start = now
+    elif isinstance(raw_start, str):
+        start = datetime.fromisoformat(raw_start)
+    elif isinstance(raw_start, datetime):
+        start = raw_start
+    else:
+        start = now
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+
+    if req.end_time is None:
+        raise AdCPValidationError("end_time is required on CreateMediaBuyRequest")
+    end = req.end_time
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=UTC)
+
+    return start, end
+
+
+def _build_package_pricing_info(req: CreateMediaBuyRequest) -> dict[str, dict[str, Any]]:
+    """Build package_pricing_info dict from request packages.
+
+    Extracts bid_price, pricing_option_id, and currency from each package
+    to pass to the adapter's create_media_buy.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for i, pkg in enumerate(req.packages or []):
+        product_id = getattr(pkg, "product_id", "unknown")
+        pkg_id = getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}"
+        bid_price = getattr(pkg, "bid_price", None)
+        pricing_option_id = getattr(pkg, "pricing_option_id", None)
+
+        # Try to extract currency from pricing_option_id format: {model}_{currency}_{type}
+        currency = getattr(pkg, "currency", None) or "USD"
+        if not getattr(pkg, "currency", None) and pricing_option_id:
+            parts = pricing_option_id.split("_")
+            if len(parts) >= 2 and len(parts[1]) == 3 and parts[1].isalpha():
+                currency = parts[1].upper()
+
+        result[pkg_id] = {
+            "pricing_model": getattr(pkg, "pricing_model", None) or "cpm",
+            "currency": currency,
+            "rate": float(bid_price) if bid_price else None,
+            "bid_price": float(bid_price) if bid_price else None,
+            "is_fixed": pricing_option_id.endswith("_fixed") if pricing_option_id else False,
+            "pricing_option_id": pricing_option_id,
+        }
+    return result
 
 
 # NOTE: _sanitize_package_status() removed in adcp 2.12.0 migration
@@ -808,9 +869,6 @@ def execute_approved_media_buy(media_buy_id: str, tenant_id: str) -> tuple[bool,
             from src.core.database.models import Creative as CreativeModel
             from src.core.database.models import CreativeAssignment
 
-            # Import adapter helper here (used for both creative upload and order approval)
-            from src.core.helpers.adapter_helpers import get_adapter
-
             # Get all creative assignments for this media buy
             stmt_assignments = select(CreativeAssignment).filter_by(media_buy_id=media_buy_id)
             assignments = session.scalars(stmt_assignments).all()
@@ -1313,24 +1371,10 @@ async def _create_media_buy_impl(
     if not tenant:
         raise AdCPAuthenticationError("No tenant context available")
 
-    # Validate setup completion (only in production, skip for testing)
-    if not testing_ctx.dry_run and not testing_ctx.test_session_id:
-        try:
-            validate_setup_complete(tenant["tenant_id"])
-        except SetupIncompleteError as e:
-            # Return helpful error with missing tasks
-            task_list = "\n".join(f"  - {task['name']}: {task['description']}" for task in e.missing_tasks)
-            error_msg = (
-                f"Setup incomplete. Please complete the following required tasks:\n\n{task_list}\n\n"
-                f"Visit the setup checklist at /tenant/{tenant['tenant_id']}/setup-checklist for details."
-            )
-            raise AdCPValidationError(error_msg, recovery="terminal")
-
     # Validate principal exists BEFORE creating context (foreign key constraint)
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
     if not principal:
         error_msg = f"Principal {principal_id} not found"
-        # Cannot create context or workflow step without valid principal
         return CreateMediaBuyResult(
             response=CreateMediaBuyError(
                 errors=[Error(code="authentication_error", message=error_msg, details=None)],
@@ -1338,6 +1382,36 @@ async def _create_media_buy_impl(
             ),
             status=AdcpTaskStatus.failed.value,
         )
+
+    # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
+    # Tool-shaped logic lives on the adapter; the base class raises
+    # NotImplementedError if the adapter opts into persistence without
+    # implementing this tool-shaped method.
+    if adapter_manages_own_persistence(tenant):
+        ext_adapter = get_adapter(principal, dry_run=testing_ctx.dry_run, testing_context=testing_ctx, tenant=tenant)
+        try:
+            # create_media_buy_for_tool internally calls the adapter's sync
+            # create_media_buy; offload to a thread so this coroutine yields
+            # the event loop during the HTTP round trip.
+            return await asyncio.to_thread(ext_adapter.create_media_buy_for_tool, req, testing_ctx)
+        except AdCPError:
+            logger.exception("External adapter create_media_buy raised typed AdCPError")
+            raise
+        except Exception as e:
+            logger.exception("External adapter create_media_buy failed")
+            raise AdCPAdapterError(f"Adapter error: {e}") from e
+
+    # Validate setup completion (only for Postgres-backed adapters, skip for testing)
+    if not testing_ctx.dry_run and not testing_ctx.test_session_id:
+        try:
+            validate_setup_complete(tenant["tenant_id"])
+        except SetupIncompleteError as e:
+            task_list = "\n".join(f"  - {task['name']}: {task['description']}" for task in e.missing_tasks)
+            error_msg = (
+                f"Setup incomplete. Please complete the following required tasks:\n\n{task_list}\n\n"
+                f"Visit the setup checklist at /tenant/{tenant['tenant_id']}/setup-checklist for details."
+            )
+            raise AdCPValidationError(error_msg, recovery="terminal")
 
     # Validate buyer_ref uniqueness within tenant+principal scope (BR-RULE-009)
     if req.buyer_ref:
@@ -3279,8 +3353,8 @@ async def _create_media_buy_impl(
                                             },
                                         )
 
-                                    # Upload to GAM using adapter's add_creative_assets method
-                                    upload_result = adapter.add_creative_assets(
+                                    # Upload using adapter's add_creative_assets method (ad server adapters only)
+                                    upload_result = adapter.add_creative_assets(  # type: ignore[attr-defined]
                                         response.media_buy_id if response.media_buy_id else "",
                                         [asset],
                                         datetime.now(UTC),
@@ -3337,7 +3411,7 @@ async def _create_media_buy_impl(
                                 logger.info(
                                     f"[cyan]Associating {len(platform_creative_ids)} pre-synced creatives with line item {platform_line_item_id}[/cyan]"
                                 )
-                                association_results = adapter.associate_creatives(
+                                association_results = adapter.associate_creatives(  # type: ignore[attr-defined]
                                     [platform_line_item_id], platform_creative_ids
                                 )
 
@@ -3383,24 +3457,24 @@ async def _create_media_buy_impl(
                         creative_id=creative.creative_id, status="rejected", detail=f"Conversion error: {str(e)}"
                     )
                     continue
-            statuses = adapter.add_creative_assets(response.media_buy_id, assets, datetime.now(UTC))
+            statuses = adapter.add_creative_assets(response.media_buy_id, assets, datetime.now(UTC))  # type: ignore[attr-defined]
 
             # Check if manual approval is required for creatives
             require_creative_approval = manual_approval_required and "add_creative_assets" in manual_approval_operations
 
-            for status in statuses:
+            for asset_status in statuses:
                 # Skip statuses without creative_id (shouldn't happen but defensive)
-                if status.creative_id:
+                if asset_status.creative_id:
                     # Override status to pending_review if manual approval is required for creatives
                     if require_creative_approval:
                         final_status: str = "pending_review"
                         detail = "Creative requires manual approval"
                     else:
-                        final_status = "approved" if status.status == "approved" else "pending_review"
+                        final_status = "approved" if asset_status.status == "approved" else "pending_review"
                         detail = "Creative submitted to ad server"
 
-                    creative_statuses[status.creative_id] = CreativeApprovalStatus(
-                        creative_id=status.creative_id,
+                    creative_statuses[asset_status.creative_id] = CreativeApprovalStatus(
+                        creative_id=asset_status.creative_id,
                         status=cast(Any, final_status),
                         detail=detail,
                     )

@@ -11,7 +11,11 @@ from sqlalchemy import select
 
 from src.core.database.database_session import get_db_session
 from src.core.database.models import Tenant, TenantAuthConfig
-from src.core.domain_config import get_sales_agent_domain, get_sales_agent_url
+from src.core.domain_config import (
+    get_sales_agent_domain,
+    get_sales_agent_public_base_url,
+    get_sales_agent_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +232,9 @@ def get_tenant_redirect_uri(tenant: Tenant) -> str:
     if tenant.virtual_host:
         # Custom domain takes highest priority
         base = f"https://{tenant.virtual_host}"
+    elif public_base := get_sales_agent_public_base_url():
+        # Path-based routing on a single host: avoid {subdomain}.{domain} OIDC URLs
+        base = public_base
     elif tenant.subdomain and get_sales_agent_domain():
         # Subdomain on main domain (multi-tenant mode with SALES_AGENT_DOMAIN set)
         base = f"https://{tenant.subdomain}.{get_sales_agent_domain()}"

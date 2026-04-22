@@ -488,3 +488,430 @@ class TestGetMediaBuysRequestRejectsInternalFlags:
         """Even include_snapshot=False must be rejected — the field doesn't belong here."""
         with pytest.raises(ValidationError):
             GetMediaBuysRequest(include_snapshot=False)
+
+
+# ── Curation early-return branch tests ───────────────────────────────────
+
+
+class TestGetMediaBuysCurationEarlyReturn:
+    """When adapter_manages_own_persistence is True, _impl delegates to
+    adapter.get_media_buys_for_tool() instead of querying Postgres.
+
+    These tests stub a real CurationAdapter (cheap to construct -- no
+    network calls at init) and override list_media_buys to assert the
+    translation that get_media_buys_for_tool performs.
+    """
+
+    def _make_identity(self):
+        from tests.factories import PrincipalFactory
+
+        return PrincipalFactory.make_identity(tenant_id="t-curation", principal_id="p1")
+
+    def _make_curation_adapter(self):
+        """Build a real CurationAdapter so isinstance check passes."""
+        from src.adapters.curation.adapter import CurationAdapter
+
+        principal = MagicMock()
+        principal.principal_id = "p1"
+        principal.get_adapter_id = MagicMock(return_value="curation-id")
+        config = {
+            "catalog_service_url": "http://catalog:8000",
+            "sales_service_url": "http://sales:8001",
+            "activation_service_url": "http://activation:8002",
+        }
+        return CurationAdapter(config, principal, dry_run=False, tenant_id="t-curation")
+
+    def _make_result(self, count: int = 0, truncated: bool = False):
+        from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
+        from src.adapters.curation.adapter import ListMediaBuysResult
+        from src.core.schemas import GetMediaBuysMediaBuy
+
+        mbs = [
+            GetMediaBuysMediaBuy(
+                media_buy_id=f"s{i}",
+                buyer_ref="buyer-1",
+                buyer_campaign_ref=None,
+                status=MediaBuyStatus.active,
+                currency="USD",
+                total_budget=100.0,
+                packages=[],
+                created_at=None,
+                updated_at=None,
+            )
+            for i in range(count)
+        ]
+        return ListMediaBuysResult(
+            media_buys=mbs,
+            truncated=truncated,
+            total_fetched=count,
+        )
+
+    def test_curation_tenant_calls_adapter_list_media_buys(self):
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result(count=2))
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            response = _get_media_buys_impl(
+                req=GetMediaBuysRequest(),
+                identity=identity,
+            )
+
+        assert len(response.media_buys) == 2
+        mock_adapter.list_media_buys.assert_called_once_with(
+            sale_ids=None,
+            buyer_refs=None,
+            statuses=["active"],
+        )
+
+    def test_curation_tenant_translates_single_status_filter(self):
+        from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(status_filter=MediaBuyStatus.active),
+                identity=identity,
+            )
+
+        kwargs = mock_adapter.list_media_buys.call_args.kwargs
+        assert kwargs["statuses"] == ["active"]
+
+    def test_curation_tenant_default_status_is_active(self):
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(req=GetMediaBuysRequest(), identity=identity)
+
+        kwargs = mock_adapter.list_media_buys.call_args.kwargs
+        assert kwargs["statuses"] == ["active"]
+
+    def test_curation_tenant_translates_completed_to_multiple_sale_statuses(self):
+        from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(status_filter=MediaBuyStatus.completed),
+                identity=identity,
+            )
+
+        kwargs = mock_adapter.list_media_buys.call_args.kwargs
+        # completed → ["completed", "canceled"]
+        assert set(kwargs["statuses"]) == {"completed", "canceled"}
+
+    def test_curation_tenant_passes_media_buy_ids_as_sale_ids(self):
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(media_buy_ids=["s1", "s2"]),
+                identity=identity,
+            )
+
+        kwargs = mock_adapter.list_media_buys.call_args.kwargs
+        assert kwargs["sale_ids"] == ["s1", "s2"]
+
+    def test_curation_tenant_passes_buyer_refs(self):
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(buyer_refs=["b1", "b2"]),
+                identity=identity,
+            )
+
+        kwargs = mock_adapter.list_media_buys.call_args.kwargs
+        assert kwargs["buyer_refs"] == ["b1", "b2"]
+
+    def test_get_principal_object_called_with_explicit_tenant_id(self):
+        """get_principal_object must be called with tenant_id=identity.tenant_id.
+
+        Regression: without this kwarg, get_principal_object falls through to
+        get_current_tenant() which requires tenant context already set at the
+        transport boundary — not available inside _get_media_buys_impl. This
+        was missed by other tests because they all patch get_principal_object.
+        """
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()  # tenant_id="t-curation"
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ) as mock_get_principal,
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(),
+                identity=identity,
+            )
+
+        # The fix: tenant_id must be passed explicitly so the function does
+        # NOT fall through to get_current_tenant() in production.
+        mock_get_principal.assert_called_once_with("p1", tenant_id="t-curation")
+
+    def test_get_adapter_called_with_explicit_tenant(self):
+        """get_adapter must be called with tenant=identity.tenant.
+
+        Regression: without the tenant kwarg, get_adapter falls through to
+        get_current_tenant() inside adapter_helpers.py, which requires
+        tenant context already set at the transport boundary — not available
+        inside _get_media_buys_impl. Same class of bug as
+        get_principal_object without tenant_id.
+        """
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()  # tenant_id="t-curation"
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result())
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ) as mock_get_adapter,
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            _get_media_buys_impl(
+                req=GetMediaBuysRequest(),
+                identity=identity,
+            )
+
+        # The fix: tenant must be passed explicitly so get_adapter does NOT
+        # fall through to get_current_tenant() in production.
+        call_kwargs = mock_get_adapter.call_args.kwargs
+        assert "tenant" in call_kwargs, f"get_adapter must be called with tenant= kwarg; got kwargs={list(call_kwargs)}"
+        assert call_kwargs["tenant"] == identity.tenant
+
+    def test_curation_tenant_truncation_appends_errors_entry(self):
+        from src.core.schemas import GetMediaBuysRequest
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(return_value=self._make_result(count=500, truncated=True))
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            response = _get_media_buys_impl(
+                req=GetMediaBuysRequest(),
+                identity=identity,
+            )
+
+        assert response.errors is not None
+        assert len(response.errors) == 1
+        assert response.errors[0]["code"] == "results_truncated"
+        assert "500" in response.errors[0]["message"]
+
+    def test_curation_tenant_include_snapshot_sets_unsupported(self):
+        from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
+        from src.adapters.curation.adapter import ListMediaBuysResult
+        from src.core.schemas import (
+            GetMediaBuysMediaBuy,
+            GetMediaBuysPackage,
+            GetMediaBuysRequest,
+            SnapshotUnavailableReason,
+        )
+        from src.core.tools.media_buy_list import _get_media_buys_impl
+
+        identity = self._make_identity()
+        mock_adapter = self._make_curation_adapter()
+        mock_adapter.list_media_buys = MagicMock(
+            return_value=ListMediaBuysResult(
+                media_buys=[
+                    GetMediaBuysMediaBuy(
+                        media_buy_id="s1",
+                        buyer_ref="b",
+                        buyer_campaign_ref=None,
+                        status=MediaBuyStatus.active,
+                        currency="USD",
+                        total_budget=0.0,
+                        packages=[
+                            GetMediaBuysPackage(
+                                package_id="seg1",
+                                buyer_ref="b",
+                                budget=None,
+                                bid_price=None,
+                                product_id="seg1",
+                                start_time=None,
+                                end_time=None,
+                                paused=None,
+                                creative_approvals=None,
+                                snapshot=None,
+                                snapshot_unavailable_reason=None,
+                            )
+                        ],
+                        created_at=None,
+                        updated_at=None,
+                    )
+                ],
+                truncated=False,
+                total_fetched=1,
+            )
+        )
+
+        with (
+            patch(
+                "src.core.tools.media_buy_list.adapter_manages_own_persistence",
+                return_value=True,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "src.core.tools.media_buy_list.get_principal_object",
+                return_value=MagicMock(principal_id="p1"),
+            ),
+        ):
+            response = _get_media_buys_impl(
+                req=GetMediaBuysRequest(),
+                identity=identity,
+                include_snapshot=True,
+            )
+
+        pkg = response.media_buys[0].packages[0]
+        assert pkg.snapshot_unavailable_reason == SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED

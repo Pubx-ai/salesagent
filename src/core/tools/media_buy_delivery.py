@@ -35,7 +35,7 @@ from src.core.database.models import MediaBuy, PricingOption
 from src.core.database.repositories import MediaBuyRepository, MediaBuyUoW
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.database.repositories.product import ProductRepository
-from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.adapter_helpers import adapter_manages_own_persistence, get_adapter
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import (
     AggregatedTotals,
@@ -160,6 +160,13 @@ def _get_media_buy_delivery_impl(
         start_dt = end_dt - timedelta(days=30)
 
     reporting_period = MediaBuyReportingPeriod(start=start_dt, end=end_dt)
+
+    # Early return for adapters that manage their own persistence (e.g. CurationAdapter).
+    # Tool-shaped logic lives on the adapter; the base class raises
+    # NotImplementedError if the adapter opts into persistence without
+    # implementing this tool-shaped method.
+    if adapter_manages_own_persistence(tenant):
+        return adapter.get_delivery_for_tool(req, reporting_period)
 
     # Determine reference date for status calculations use end_date, it either will be today or the user provided end_date.
     reference_date = end_dt.date()
@@ -458,7 +465,6 @@ def _get_media_buy_delivery_impl(
 
                 # Cast status to match Literal type requirement
                 from typing import Literal as LiteralType
-                from typing import cast
 
                 status_typed = cast(
                     LiteralType["ready", "active", "paused", "completed", "failed", "reporting_delayed"], status

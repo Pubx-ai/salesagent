@@ -29,7 +29,7 @@ CONFIRMED (57 tests) — Schema fields, required/optional, types, XOR constraint
 UNSPECIFIED (28 tests) — Implementation-defined, not in AdCP spec:
   Access control (allowed_principal_ids, anonymous discovery, pricing suppression)
   Product conversion (DB→schema, ValueError on failure, roundtrip)
-  Publisher domain sorting, product uniqueness, relevance threshold 0.1
+  Publisher domain sorting, product uniqueness, relevance threshold 0.3
   Error response schemas (policy, auth)
   Offering text derivation from brand name/url
 
@@ -1742,7 +1742,7 @@ class TestRelevanceThresholdSchema:
     """AI ranking threshold filter behavior at schema level."""
 
     async def test_threshold_boundary_included(self):
-        """Score exactly at threshold (0.1) is included.
+        """Score exactly at threshold (0.3) is included.
 
         Covers: CONSTR-RELEVANCE-THRESHOLD-01
         """
@@ -1758,9 +1758,9 @@ class TestRelevanceThresholdSchema:
             mock_factory.create_model.return_value = MagicMock()
             env.mock["ranking_factory"].return_value = mock_factory
 
-            # Mock ranking to return score exactly at threshold (0.1)
+            # Mock ranking to return score exactly at threshold (0.3)
             mock_result = MagicMock()
-            mock_result.rankings = [MagicMock(product_id="prod_boundary", relevance_score=0.1, reason="ok")]
+            mock_result.rankings = [MagicMock(product_id="prod_boundary", relevance_score=0.3, reason="ok")]
 
             with (
                 patch(
@@ -1773,10 +1773,10 @@ class TestRelevanceThresholdSchema:
                 response = await env.call_impl(brief="test")
 
             product_ids = [p.product_id for p in response.products]
-            assert "prod_boundary" in product_ids, "Score at threshold (0.1) should be included"
+            assert "prod_boundary" in product_ids, "Score at threshold (0.3) should be included"
 
     async def test_threshold_below_excluded(self):
-        """Score below threshold (0.09) is excluded.
+        """Score below threshold (0.29) is excluded.
 
         Covers: CONSTR-RELEVANCE-THRESHOLD-01
         """
@@ -1796,7 +1796,7 @@ class TestRelevanceThresholdSchema:
             # Mock ranking: one below threshold, one above
             mock_result = MagicMock()
             mock_result.rankings = [
-                MagicMock(product_id="prod_low", relevance_score=0.09, reason="too low"),
+                MagicMock(product_id="prod_low", relevance_score=0.29, reason="too low"),
                 MagicMock(product_id="prod_high", relevance_score=0.5, reason="ok"),
             ]
 
@@ -1812,7 +1812,7 @@ class TestRelevanceThresholdSchema:
 
             product_ids = [p.product_id for p in response.products]
             assert "prod_high" in product_ids, "Score above threshold included"
-            assert "prod_low" not in product_ids, "Score below threshold (0.09) excluded"
+            assert "prod_low" not in product_ids, "Score below threshold (0.29) excluded"
 
     def test_no_ranking_means_no_threshold(self):
         """Without ranking active, all products pass (no threshold applied).
@@ -1824,3 +1824,85 @@ class TestRelevanceThresholdSchema:
         # No brief_relevance on product means no ranking was applied
         dumped = product.model_dump()
         assert dumped.get("brief_relevance") is None
+
+    async def test_relevance_score_emitted_under_ext_not_root(self):
+        """AI-ranked products expose relevance_score under ext, not at the root.
+
+        Regression guard: AdCP spec does not define a root-level
+        ``relevance_score`` field. Emitting it there silently extended the
+        wire format. It now lives under ``ext.relevance_score`` (the
+        sanctioned vendor extension point) while the root attribute on the
+        Python model is retained as ``exclude=True`` for internal use.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        with ProductEnv() as env:
+            env.add_product(product_id="prod_ranked")
+
+            env.identity.tenant["product_ranking_prompt"] = "rank by relevance"
+            mock_factory = MagicMock()
+            mock_factory.is_ai_enabled.return_value = True
+            mock_factory.create_model.return_value = MagicMock()
+            env.mock["ranking_factory"].return_value = mock_factory
+
+            mock_result = MagicMock()
+            mock_result.rankings = [MagicMock(product_id="prod_ranked", relevance_score=0.87, reason="Highly relevant")]
+
+            with (
+                patch(
+                    "src.services.ai.agents.ranking_agent.rank_products_async",
+                    new_callable=AsyncMock,
+                    return_value=mock_result,
+                ),
+                patch("src.services.ai.agents.ranking_agent.create_ranking_agent"),
+            ):
+                response = await env.call_impl(brief="test")
+
+            product = next(p for p in response.products if p.product_id == "prod_ranked")
+            dumped = product.model_dump()
+
+            # Wire shape: ext.relevance_score present, root-level absent
+            assert "relevance_score" not in dumped, (
+                "relevance_score must not leak at the root of the AdCP response; "
+                "it is a vendor extension and belongs under ext"
+            )
+            assert dumped.get("ext", {}).get("relevance_score") == 0.87
+
+    async def test_relevance_score_ext_preserves_existing_ext_keys(self):
+        """Writing relevance_score to ext must not clobber other ext fields.
+
+        Sellers (e.g. CurationAdapter) already populate ext with domain
+        metadata like ``signals_used`` and ``domains``. The ranking write
+        must merge, not overwrite.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        with ProductEnv() as env:
+            # Seed a product whose ext already has vendor-specific keys
+            env.add_product(product_id="prod_ext", ext={"signals_used": ["sports"], "domains": ["a.com"]})
+
+            env.identity.tenant["product_ranking_prompt"] = "rank by relevance"
+            mock_factory = MagicMock()
+            mock_factory.is_ai_enabled.return_value = True
+            mock_factory.create_model.return_value = MagicMock()
+            env.mock["ranking_factory"].return_value = mock_factory
+
+            mock_result = MagicMock()
+            mock_result.rankings = [MagicMock(product_id="prod_ext", relevance_score=0.55, reason="ok")]
+
+            with (
+                patch(
+                    "src.services.ai.agents.ranking_agent.rank_products_async",
+                    new_callable=AsyncMock,
+                    return_value=mock_result,
+                ),
+                patch("src.services.ai.agents.ranking_agent.create_ranking_agent"),
+            ):
+                response = await env.call_impl(brief="test")
+
+            product = next(p for p in response.products if p.product_id == "prod_ext")
+            ext = product.model_dump().get("ext", {})
+
+            assert ext.get("relevance_score") == 0.55
+            assert ext.get("signals_used") == ["sports"]
+            assert ext.get("domains") == ["a.com"]

@@ -4,11 +4,13 @@ This module contains the get_products tool implementation following the MCP/A2A
 shared implementation pattern from CLAUDE.md.
 """
 
+import asyncio
 import logging
 import os
 import time
 from typing import Any, cast
 
+import httpx
 from adcp import FormatId, ProductFilters
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
@@ -22,7 +24,7 @@ from pydantic import ValidationError
 from src.adapters import get_adapter_default_channels
 from src.core.audit_logger import get_audit_logger
 from src.core.auth import get_principal_object
-from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPValidationError
+from src.core.exceptions import AdCPAuthenticationError, AdCPAuthorizationError, AdCPError, AdCPValidationError
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schema_helpers import create_get_products_request
 from src.core.schemas import (
@@ -163,7 +165,6 @@ async def _get_products_impl(
     if not req.brief and not req.brand and not req.filters:
         raise AdCPValidationError("At least one of 'brief', 'brand', or 'filters' is required")
 
-    # Extract identity fields
     if identity is None:
         raise AdCPValidationError("Identity is required")
 
@@ -187,7 +188,6 @@ async def _get_products_impl(
             "Cannot determine tenant context. Please provide valid authentication or ensure tenant can be identified from request headers."
         )
 
-    # Get the Principal object with ad server mappings
     principal = get_principal_object(principal_id, tenant_id=identity.tenant_id) if principal_id else None
 
     # Extract offering text from brand (adcp 3.6.0: brand replaces brand_manifest).
@@ -198,7 +198,6 @@ async def _get_products_impl(
         if domain:
             offering = f"Brand at {domain}"
 
-    # Check brand_manifest_policy from tenant settings
     brand_manifest_policy = tenant.get("brand_manifest_policy", "require_auth")
 
     # Enforce policy-based validation
@@ -219,7 +218,6 @@ async def _get_products_impl(
 
     # Note: brand_manifest validation is handled by Pydantic schema, no need for runtime validation here
 
-    # Check policy compliance first (if enabled)
     advertising_policy = safe_parse_json_field(
         tenant.get("advertising_policy"), field_name="advertising_policy", default={}
     )
@@ -237,7 +235,6 @@ async def _get_products_impl(
         policy_disabled_reason = "disabled_by_tenant"
         logger.info(f"Policy checks disabled for tenant {tenant['tenant_id']}")
     else:
-        # Get tenant's Gemini API key for policy checks
         tenant_gemini_key = tenant.get("gemini_api_key")
         if not tenant_gemini_key:
             # No API key - cannot run policy checks
@@ -258,7 +255,6 @@ async def _get_products_impl(
                     tenant_policies=tenant_policies if tenant_policies else None,
                 )
 
-                # Log successful policy check
                 audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
                 audit_logger.log_operation(
                     operation="policy_check",
@@ -337,35 +333,74 @@ async def _get_products_impl(
             details={"error_code": "POLICY_VIOLATION"},
         )
 
-    # Resolve adapter type for delivery_measurement defaults
-    ad_server_config = tenant.get("ad_server", {})
-    tenant_adapter_type = (
-        ad_server_config.get("adapter", "mock") if isinstance(ad_server_config, dict) else ad_server_config
-    )
+    from src.core.helpers.adapter_helpers import _coerce_adapter_type, adapter_manages_own_persistence
 
-    # Query products via repository (tenant-scoped)
-    from src.core.database.repositories.uow import ProductUoW
+    tenant_adapter_type = _coerce_adapter_type(tenant.get("ad_server"))
 
-    with ProductUoW(tenant["tenant_id"]) as uow:
-        assert uow.products is not None
-        db_products = uow.products.list_all()
+    # Check if the adapter provides its own product catalog (e.g. CurationAdapter).
+    # Uses registry class attribute check to avoid unnecessary adapter instantiation.
+    # Runs for both authenticated and anonymous callers — the external catalog
+    # is the source of truth for curation tenants regardless of auth state.
+    # Adapters that require a principal (e.g. GAM) raise AdCPAuthenticationError
+    # from get_adapter() when principal is None.
+    adapter_products = None
 
-        # Convert database Product models to AdCP Product schema
-        products = []
-        for product_obj in db_products:
-            try:
-                validated_product = convert_product_model_to_schema(product_obj, adapter_type=tenant_adapter_type)
-                products.append(validated_product)
-                logger.debug(f"Successfully converted product {product_obj.product_id}")
-            except Exception as e:
-                error_msg = (
-                    f"Product '{product_obj.product_id}' failed to convert to AdCP schema. "
-                    f"This indicates data corruption or migration issue. Error: {e}"
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg) from e
+    if adapter_manages_own_persistence(tenant):
+        from src.core.exceptions import AdCPAdapterError
+        from src.core.helpers.adapter_helpers import get_adapter
 
-    logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
+        try:
+            adapter_instance = get_adapter(principal, dry_run=True, tenant=tenant)
+            # `get_product_catalog` issues synchronous `httpx.Client` requests
+            # (curation adapter) that would otherwise block the asyncio event
+            # loop for the duration of the round trip. Offloading to a worker
+            # thread keeps other coroutines scheduled while we wait on I/O
+            # without forcing every adapter to expose an async variant.
+            adapter_products = await asyncio.to_thread(adapter_instance.get_product_catalog, tenant["tenant_id"])
+        except AdCPError:
+            # Surface typed AdCP errors as-is (e.g. validation, not-found).
+            raise
+        except Exception as e:
+            # Adapters that manage their own persistence are the authoritative
+            # source of products for this tenant — silently falling back to an
+            # empty Postgres catalog would hide the outage from the caller.
+            # Convert to a typed adapter error so the transport layer maps to
+            # 502 ADAPTER_ERROR with a transient recovery hint.
+            logger.exception(
+                "[GET_PRODUCTS] Adapter product catalog fetch failed for tenant %s",
+                tenant["tenant_id"],
+            )
+            raise AdCPAdapterError(f"Adapter product catalog fetch failed for tenant {tenant['tenant_id']}: {e}") from e
+
+    if adapter_products is not None:
+        products = adapter_products
+        logger.info(
+            f"[GET_PRODUCTS] Got {len(products)} products from adapter catalog for tenant {tenant['tenant_id']}"
+        )
+    else:
+        # Default path: query products via repository (tenant-scoped)
+        from src.core.database.repositories.uow import ProductUoW
+
+        with ProductUoW(tenant["tenant_id"]) as uow:
+            assert uow.products is not None
+            db_products = uow.products.list_all()
+
+            # Convert database Product models to AdCP Product schema
+            products = []
+            for product_obj in db_products:
+                try:
+                    validated_product = convert_product_model_to_schema(product_obj, adapter_type=tenant_adapter_type)
+                    products.append(validated_product)
+                    logger.debug(f"Successfully converted product {product_obj.product_id}")
+                except Exception as e:
+                    error_msg = (
+                        f"Product '{product_obj.product_id}' failed to convert to AdCP schema. "
+                        f"This indicates data corruption or migration issue. Error: {e}"
+                    )
+                    logger.error(error_msg)
+                    raise ValueError(error_msg) from e
+
+        logger.info(f"[GET_PRODUCTS] Got {len(products)} products from database for tenant {tenant['tenant_id']}")
 
     # Filter products by principal access control
     # Products with allowed_principal_ids set are only visible to those specific principals
@@ -373,7 +408,6 @@ async def _get_products_impl(
     if principal_id:
         filtered_by_access = []
         for product in products:
-            # Check if product has access restrictions
             allowed_ids = getattr(product, "allowed_principal_ids", None)
             if allowed_ids is None or len(allowed_ids) == 0:
                 # No restrictions - visible to all
@@ -427,18 +461,13 @@ async def _get_products_impl(
     try:
         from src.services.dynamic_products import generate_variants_for_brief
 
-        # Get our agent URL for deployment specification
         our_agent_url = tenant.get("virtual_host")  # Our sales agent URL (e.g., https://sales.example.com)
 
         dynamic_variants = await generate_variants_for_brief(tenant["tenant_id"], brief_text, our_agent_url)
         if dynamic_variants:
-            # Convert Product models to Product schemas for response
-
             for variant_model in dynamic_variants:
-                # Convert database model to schema (returns library Product)
                 # Cast to our extended Product type for mypy compatibility
                 variant_schema = convert_product_model_to_schema(variant_model, adapter_type=tenant_adapter_type)
-                # Type: ignore - library Product is compatible with our extended Product at runtime
                 products.append(variant_schema)
 
             logger.info(f"[GET_PRODUCTS] Added {len(dynamic_variants)} dynamic product variants")
@@ -449,24 +478,27 @@ async def _get_products_impl(
 
     # Enrich products with dynamic pricing from cached performance metrics
     # Updates pricing_options with price_guidance (floor, recommended) and estimated_exposures
-    try:
-        from src.services.dynamic_pricing_service import DynamicPricingService
+    # Skip for adapters that manage their own persistence (no pricing data in Postgres)
+    if not adapter_manages_own_persistence(tenant):
+        try:
+            from src.core.database.repositories.uow import ProductUoW as PricingProductUoW
+            from src.services.dynamic_pricing_service import DynamicPricingService
 
-        # Extract country from request if available (future enhancement: parse from targeting)
-        country_code = None  # TODO: Extract from targeting if provided
+            # Extract country from request if available (future enhancement: parse from targeting)
+            country_code = None  # TODO: Extract from targeting if provided
 
-        with ProductUoW(tenant["tenant_id"]) as pricing_uow:
-            # FIXME(salesagent-9f2): DynamicPricingService needs a repository, not raw session
-            assert pricing_uow.session is not None
-            pricing_service = DynamicPricingService(pricing_uow.session)
-            products = pricing_service.enrich_products_with_pricing(
-                products,
-                tenant_id=tenant["tenant_id"],
-                country_code=country_code,
-                min_exposures=getattr(req.filters, "min_exposures", None) if req.filters else None,
-            )
-    except (ImportError, RuntimeError, OSError) as e:
-        logger.warning(f"Failed to enrich products with dynamic pricing: {e}. Using defaults.")
+            with PricingProductUoW(tenant["tenant_id"]) as pricing_uow:
+                # FIXME(salesagent-9f2): DynamicPricingService needs a repository, not raw session
+                assert pricing_uow.session is not None
+                pricing_service = DynamicPricingService(pricing_uow.session)
+                products = pricing_service.enrich_products_with_pricing(
+                    products,
+                    tenant_id=tenant["tenant_id"],
+                    country_code=country_code,
+                    min_exposures=getattr(req.filters, "min_exposures", None) if req.filters else None,
+                )
+        except (ImportError, RuntimeError, OSError) as e:
+            logger.warning(f"Failed to enrich products with dynamic pricing: {e}. Using defaults.")
 
     # Apply AdCP filters if provided
     if req.filters:
@@ -494,25 +526,10 @@ async def _get_products_impl(
                 if not has_matching_pricing:
                     continue
 
-            # Filter by format_types
-            if req.filters.format_types:
-                # Product.format_ids is list[str] (format IDs), need to look up types from FORMAT_REGISTRY
-                from src.core.schemas import get_format_by_id
-
-                product_format_types = set()
-                for format_id in product.format_ids:
-                    if isinstance(format_id, str):
-                        format_obj = get_format_by_id(format_id)
-                        if format_obj:
-                            product_format_types.add(format_obj.type)
-                    elif isinstance(format_id, FormatId):
-                        # FormatId object — look up the format for its type
-                        format_obj = get_format_by_id(format_id.id)
-                        if format_obj:
-                            product_format_types.add(format_obj.type)
-
-                if not any(fmt_type in product_format_types for fmt_type in req.filters.format_types):
-                    continue
+            # TODO(pubx): Re-enable format_types filtering once curation segments
+            # reliably populate inventory_formats and creative agent registry is stable.
+            # if req.filters.format_types:
+            #     ...
 
             # Filter by format_ids
             if req.filters.format_ids:
@@ -606,15 +623,7 @@ async def _get_products_impl(
                     if not product_channels.intersection(request_channels):
                         continue
                 else:
-                    # Product has no channels - use adapter defaults
-                    # Get adapter type from tenant config
-                    ad_server_config = tenant.get("ad_server", {})
-                    adapter_type = (
-                        ad_server_config.get("adapter", "mock")
-                        if isinstance(ad_server_config, dict)
-                        else ad_server_config
-                    )
-                    adapter_channels = get_adapter_default_channels(adapter_type)
+                    adapter_channels = get_adapter_default_channels(tenant_adapter_type)
 
                     # Product matches if any of adapter's default channels is in request
                     if adapter_channels and not request_channels.intersection(set(adapter_channels)):
@@ -683,8 +692,11 @@ async def _get_products_impl(
                     filtered_products.append(product)
         eligible_products = filtered_products
 
-    # AI-powered product ranking (when tenant has product_ranking_prompt configured)
+    # AI-powered product ranking (when tenant has product_ranking_prompt configured).
+    # Curation tenants get their prompt seeded at adapter-config-save time via
+    # CurationAdapter.on_config_saved — no adapter-specific branch here.
     product_ranking_prompt = tenant.get("product_ranking_prompt")
+
     if product_ranking_prompt and brief_text and eligible_products:
         try:
             from src.services.ai.agents.ranking_agent import (
@@ -694,12 +706,11 @@ async def _get_products_impl(
             from src.services.ai.factory import get_factory
 
             factory = get_factory()
-            if factory.is_ai_enabled():
-                model = factory.create_model()
+            tenant_ai_config = tenant.get("ai_config")
+            if factory.is_ai_enabled(tenant_ai_config):
+                model = factory.create_model(tenant_ai_config=tenant_ai_config)
                 agent = create_ranking_agent(model)
 
-                # Convert products to dicts for ranking
-                # Run AI ranking
                 ranking_result = await rank_products_async(
                     agent=agent,
                     custom_prompt=product_ranking_prompt,
@@ -707,31 +718,92 @@ async def _get_products_impl(
                     products=eligible_products,
                 )
 
-                # Build a map of product_id -> (score, reason)
                 ranking_map = {r.product_id: (r.relevance_score, r.reason) for r in ranking_result.rankings}
 
-                # Sort products by relevance score (highest first)
-                # Products not in ranking_map get score 0
+                # Products not in ranking_map get score 0 (sorted last).
                 eligible_products.sort(
                     key=lambda p: ranking_map.get(p.product_id, (0.0, ""))[0],
                     reverse=True,
                 )
 
-                # Filter out products with very low relevance (score < 0.1)
-                eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.1]
+                # Filter out products below the relevance threshold advertised in the
+                # ranking prompt (>= 0.3). Keeping a lower bar here would surface
+                # weakly-matching products the AI was instructed to omit.
+                eligible_products = [p for p in eligible_products if ranking_map.get(p.product_id, (0.0, ""))[0] >= 0.3]
 
-                # Log the ranking results
-                for r in ranking_result.rankings:
-                    logger.info(f"[AI_RANKING] {r.product_id}: score={r.relevance_score:.2f}, reason={r.reason}")
+                # Write ranking results back to product objects.
+                # ``relevance_score`` is our own extension — not an AdCP root
+                # field — so we emit it under ``ext.relevance_score`` (the
+                # spec-sanctioned vendor extension point). Buyers migrated
+                # off reading ``product.relevance_score`` at root before this
+                # change landed; once every consumer is on ``ext.*``, the
+                # model field can be dropped entirely (tracked in
+                # salesagent-63n).
+                from adcp.types import ExtensionObject
+
+                for product in eligible_products:
+                    score, reason = ranking_map.get(product.product_id, (0.0, ""))
+                    product.brief_relevance = reason or None
+                    # ExtensionObject uses model_config={"extra": "allow"} with no
+                    # declared fields, so content lives in ``model_extra``. Reading
+                    # that keeps us within the "no model_dump in _impl" guard while
+                    # still merging correctly with dict-shaped ext (seed data, older
+                    # code paths) and ExtensionObject instances (normal path).
+                    existing_ext: dict[str, Any] = {}
+                    if isinstance(product.ext, dict):
+                        existing_ext = product.ext
+                    elif product.ext is not None:
+                        existing_ext = dict(product.ext.model_extra or {})
+                    product.ext = ExtensionObject.model_validate({**existing_ext, "relevance_score": round(score, 2)})
+
+                if logger.isEnabledFor(logging.DEBUG):
+                    for r in ranking_result.rankings:
+                        logger.debug(
+                            "[AI_RANKING] %s: score=%.2f, reason=%s",
+                            r.product_id,
+                            r.relevance_score,
+                            r.reason,
+                        )
 
                 logger.info(
                     f"[GET_PRODUCTS] AI ranking applied: {len(ranking_result.rankings)} products ranked, "
                     f"{len(eligible_products)} products above threshold"
                 )
             else:
+                if adapter_manages_own_persistence(tenant):
+                    raise AdCPValidationError(
+                        "An AI API key is required for curation tenants. "
+                        "AI ranking is needed to match segments to your brief. "
+                        "Set the API key in Pubx Curation settings or set GEMINI_API_KEY in the environment.",
+                        recovery="terminal",
+                    )
                 logger.debug("[GET_PRODUCTS] AI ranking configured but AI not enabled (no API key)")
-        except (ImportError, RuntimeError, OSError) as e:
-            logger.warning(f"Failed to apply AI product ranking: {e}. Returning unranked products.")
+        except AdCPError:
+            # Preserve typed AdCP errors (validation, not-found, …) — let the
+            # transport boundary translate them to the right HTTP/MCP code.
+            raise
+        except (TypeError, AttributeError, NameError, AssertionError):
+            # Programming bugs must always propagate so they're caught in
+            # tests / observability rather than masked as a degraded ranking.
+            raise
+        except Exception as e:
+            # Long tail of non-AdCP failures from the AI provider (network,
+            # auth, parsing, SDK, bad model output). Classify before surfacing:
+            #   - Network/timeout errors are transient → tell the client to retry.
+            #   - Everything else (bad model output, schema mismatch, …) is
+            #     terminal: retrying won't help and would re-burn the fallback
+            #     chain. Curation tenants get a terminal adapter error so the
+            #     outage is visible; non-curation tenants fall back to the
+            #     unranked list (ranking is best-effort there).
+            is_transient = isinstance(e, httpx.HTTPError | asyncio.TimeoutError | TimeoutError)
+            if adapter_manages_own_persistence(tenant):
+                from src.core.exceptions import AdCPAdapterError
+
+                raise AdCPAdapterError(
+                    f"AI ranking failed for curation tenant: {e}",
+                    recovery="transient" if is_transient else "terminal",
+                ) from e
+            logger.warning("Failed to apply AI product ranking: %s. Returning unranked products.", e)
 
     # Annotate pricing options with adapter support (AdCP PR #88)
     # Do this BEFORE serialization to avoid reconstruction issues
@@ -763,11 +835,9 @@ async def _get_products_impl(
         except (ImportError, RuntimeError, OSError, ValueError) as e:
             logger.warning(f"Failed to annotate pricing options with adapter support: {e}")
 
-    # Filter pricing data for anonymous users
-    # Do this BEFORE serialization to avoid reconstruction issues
-    if principal_id is None:  # Anonymous user
-        # Remove pricing data from products for anonymous users
-        # Set to empty list to hide pricing (will be excluded during serialization)
+    # Hide pricing data from anonymous users BEFORE serialization (empty list is
+    # excluded from the wire payload, avoiding reconstruction issues downstream).
+    if principal_id is None:
         for product in eligible_products:
             product.pricing_options = []
 
@@ -785,7 +855,6 @@ async def _get_products_impl(
         context=req.context,
     )
 
-    # Log successful get_products call
     elapsed_ms = int((time.time() - start_time) * 1000)
     audit_logger = get_audit_logger("AdCP", tenant["tenant_id"])
     audit_logger.log_operation(
@@ -833,7 +902,6 @@ async def get_products(
     Returns:
         ToolResult with human-readable text and structured data
     """
-    # Build request object for shared implementation
     try:
         req = create_get_products_request(
             brief=brief,
@@ -846,17 +914,13 @@ async def get_products(
     except ValidationError as e:
         raise AdCPValidationError(format_validation_error(e, context="get_products request")) from e
     except ValueError as e:
-        # Convert ValueError from helper to ToolError with clear message
         raise AdCPValidationError(f"Invalid get_products request: {e}") from e
 
     # Read identity pre-resolved by MCPAuthMiddleware
     identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
 
-    # Call shared implementation
-    # Note: GetProductsRequest is now a flat class (not RootModel), so pass req directly
     response = await _get_products_impl(req, identity)
 
-    # Return ToolResult with human-readable text and structured data
     response_dict = response.model_dump(mode="json")
     # Apply v2.x backward-compat fields only for pre-3.0 clients
     from src.core.version_compat import apply_version_compat
@@ -903,7 +967,6 @@ async def get_products_raw(
 
         identity = resolve_identity_from_context(ctx, require_valid_token=False)
 
-    # Create request object - adcp library validates schema
     req = create_get_products_request(
         brief=brief or "",
         brand=brand,
@@ -912,7 +975,6 @@ async def get_products_raw(
         context=context,
     )
 
-    # Call shared implementation
     return await _get_products_impl(req, identity)
 
 

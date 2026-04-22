@@ -6,6 +6,7 @@ for monitoring and reporting workflows.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -61,7 +62,7 @@ from src.core.auth import get_principal_object
 from src.core.database.models import Creative, CreativeAssignment, MediaBuy
 from src.core.database.repositories import MediaBuyUoW
 from src.core.exceptions import AdCPAuthenticationError, AdCPValidationError
-from src.core.helpers.adapter_helpers import get_adapter
+from src.core.helpers.adapter_helpers import adapter_manages_own_persistence, get_adapter
 from src.core.schemas import (
     ApprovalStatus,
     CreativeApproval,
@@ -105,7 +106,11 @@ def _get_media_buys_impl(
             errors=[{"code": "principal_id_missing", "message": "Principal ID not found in context"}],
         )
 
-    principal = get_principal_object(principal_id)
+    # Pass tenant_id explicitly so get_principal_object doesn't fall through
+    # to get_current_tenant() — that path requires tenant context to already
+    # be set at the transport boundary, which we cannot rely on in the _impl
+    # layer. Matches the pattern in src/core/tools/products.py.
+    principal = get_principal_object(principal_id, tenant_id=identity.tenant_id)
     if not principal:
         return GetMediaBuysResponse(
             media_buys=[],
@@ -115,6 +120,19 @@ def _get_media_buys_impl(
     tenant = identity.tenant
     today = datetime.now(UTC).date()
     tenant_id: str = tenant["tenant_id"]
+
+    # Adapters with manages_own_persistence=True bypass Postgres entirely.
+    # Tool-shaped logic lives on the adapter; the base class raises
+    # NotImplementedError if the adapter opts into persistence without
+    # implementing this tool-shaped method.
+    if adapter_manages_own_persistence(tenant):
+        adapter = get_adapter(
+            principal,
+            dry_run=testing_ctx.dry_run if testing_ctx else False,
+            testing_context=testing_ctx,
+            tenant=tenant,
+        )
+        return adapter.get_media_buys_for_tool(req, include_snapshot=include_snapshot)
 
     # Single DB session for all reads — ORM objects are converted to plain
     # dataclasses inside the UoW scope so nothing is accessed after session close.
@@ -141,6 +159,7 @@ def _get_media_buys_impl(
             principal,
             dry_run=testing_ctx.dry_run if testing_ctx else False,
             testing_context=testing_ctx,
+            tenant=tenant,
         )
         if adapter.capabilities.supports_realtime_reporting:
             # Build list of (media_buy_id, package_id, platform_line_item_id) for the adapter
@@ -251,7 +270,15 @@ async def get_media_buys(
         )
         # Read identity pre-resolved by MCPAuthMiddleware
         identity = (await ctx.get_state("identity")) if isinstance(ctx, Context) else None
-        response = _get_media_buys_impl(req, identity=identity, include_snapshot=include_snapshot)
+        # _get_media_buys_impl is sync and performs blocking I/O — SQLAlchemy
+        # queries on Postgres for normal tenants, and a sync httpx round trip
+        # via adapter.list_media_buys() for curation tenants. Offload to a
+        # thread so this coroutine yields the event loop while those calls are
+        # outstanding. Mirrors the pattern used for get_products /
+        # create_media_buy in commit a8b50ec9.
+        response = await asyncio.to_thread(
+            _get_media_buys_impl, req, identity=identity, include_snapshot=include_snapshot
+        )
         return ToolResult(content=str(response), structured_content=response)
     except ValidationError as e:
         raise ToolError(format_validation_error(e, context="get_media_buys request"))

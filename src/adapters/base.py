@@ -6,7 +6,17 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    from src.core.schemas import Snapshot, Targeting
+    from src.core.schemas import (
+        CreateMediaBuyResult,
+        GetMediaBuyDeliveryRequest,
+        GetMediaBuyDeliveryResponse,
+        GetMediaBuysRequest,
+        GetMediaBuysResponse,
+        Snapshot,
+        Targeting,
+    )
+    from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+    from src.core.testing_hooks import AdCPTestContext
 
 from adcp.types.aliases import Package as ResponsePackage
 from pydantic import BaseModel, ConfigDict, Field
@@ -171,23 +181,200 @@ class CreativeEngineAdapter(ABC):
         pass
 
 
-class AdServerAdapter(ABC):
-    """Abstract base class for ad server adapters."""
+class ToolProvider(ABC):
+    """Abstract interface for all tool-level integrations.
 
-    # Default advertising channels supported by this adapter
-    # Subclasses should override with their supported channels
+    Defines the operations that _impl functions depend on regardless of whether
+    the backend is an ad server (GAM, Kevel) or a curation service.
+
+    AdServerAdapter and CurationProvider both extend this, adding
+    domain-specific methods for their respective integration patterns.
+    """
+
+    adapter_name: str = ""
+
+    # When True, the provider is the sole source of truth for data persistence.
+    # _impl functions skip Postgres ORM creation and delegate fully to the provider.
+    manages_own_persistence: bool = False
+
+    # Discovery metadata
     default_channels: list[str] = []
-
-    # Default delivery measurement provider for products created by this adapter.
-    # Per AdCP spec, delivery_measurement is REQUIRED on all products.
-    # Subclasses should override with their specific measurement provider.
     default_delivery_measurement: dict[str, str] = {"provider": "publisher"}
-
-    # Adapter capabilities - override in subclasses
     capabilities: AdapterCapabilities = AdapterCapabilities()
-
-    # Connection config schema - override in subclasses
     connection_config_class: type[BaseConnectionConfig] | None = BaseConnectionConfig
+
+    # Set by __init__ in subclasses
+    config: dict[str, Any]
+    principal: Principal
+    dry_run: bool
+    tenant_id: str
+    manual_approval_required: bool
+    manual_approval_operations: set[str]
+
+    @abstractmethod
+    def create_media_buy(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> CreateMediaBuyResponse:
+        """Create a media buy / sale / deal on the external system."""
+        ...
+
+    @abstractmethod
+    def check_media_buy_status(self, media_buy_id: str, today: datetime) -> CheckMediaBuyStatusResponse:
+        """Check the current status of a media buy."""
+        ...
+
+    @abstractmethod
+    def get_media_buy_delivery(
+        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        """Get delivery data for a media buy."""
+        ...
+
+    @abstractmethod
+    def update_media_buy(
+        self,
+        media_buy_id: str,
+        buyer_ref: str,
+        action: str,
+        package_id: str | None,
+        budget: int | None,
+        today: datetime,
+    ) -> UpdateMediaBuyResponse:
+        """Update a media buy (pause, resume, cancel, budget change)."""
+        ...
+
+    @abstractmethod
+    def update_media_buy_performance_index(
+        self, media_buy_id: str, package_performance: list[PackagePerformance]
+    ) -> bool:
+        """Update performance index for packages in a media buy."""
+        ...
+
+    def get_supported_pricing_models(self) -> set[str]:
+        """Return set of pricing models this provider supports."""
+        return {"cpm"}
+
+    def get_targeting_capabilities(self) -> TargetingCapabilities:
+        """Return targeting capabilities this provider supports."""
+        return TargetingCapabilities(geo_countries=False)
+
+    def validate_media_buy_request(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> list[str]:
+        """Pre-validate a media buy request. Returns list of error messages."""
+        errors: list[str] = []
+        supported = self.get_supported_pricing_models()
+
+        if package_pricing_info:
+            for _pkg_id, pricing in package_pricing_info.items():
+                pricing_model = pricing.get("pricing_model", "")
+                if pricing_model and pricing_model.lower() not in supported:
+                    sorted_supported = ", ".join(sorted(s.upper() for s in supported))
+                    errors.append(
+                        f"Adapter does not support '{pricing_model}' pricing. "
+                        f"Supported pricing models: {sorted_supported}. "
+                        f"The requested pricing model ('{pricing_model}') is not available. "
+                        f"Please choose a product with compatible pricing."
+                    )
+
+        return errors
+
+    def get_product_catalog(self, tenant_id: str) -> list[Any] | None:
+        """Return products from an external catalog managed by this provider.
+
+        Override in providers that manage their own product/segment catalogs.
+        When this returns a non-None list, the caller uses it instead of
+        querying the PostgreSQL product table.
+
+        Returns None by default (fall through to Postgres).
+        """
+        return None
+
+    def get_packages_snapshot(
+        self, package_refs: list[tuple[str, str, str | None]]
+    ) -> dict[str, dict[str, Snapshot | None]]:
+        """Get near-real-time delivery snapshots for packages."""
+        raise NotImplementedError("Snapshots not supported by this provider")
+
+    @classmethod
+    def on_config_saved(cls, tenant_id: str) -> None:
+        """Hook called after an operator saves this adapter's config for a tenant.
+
+        Override in subclasses that need post-save provisioning (e.g. seeding
+        a default ranking prompt, creating external resources). Base
+        implementation is a no-op so existing adapters need no changes.
+
+        Called from ``src/admin/blueprints/adapters.py::save_adapter_config``
+        after ``session.commit()`` on the AdapterConfig write. Idempotency is
+        the overrider's responsibility.
+        """
+        return None
+
+    def get_delivery_for_tool(
+        self,
+        req: GetMediaBuyDeliveryRequest,
+        reporting_period: MediaBuyReportingPeriod,
+    ) -> GetMediaBuyDeliveryResponse:
+        """Tool-shaped delivery entry for media_buy_delivery.
+
+        Override on adapters with ``manages_own_persistence=True`` that need
+        to bypass Postgres. Called from ``_get_media_buy_delivery_impl`` when
+        the adapter owns persistence. Default raises NotImplementedError so
+        adapters that opt into ``manages_own_persistence`` without a full
+        tool-shaped implementation fail loudly instead of silently.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares manages_own_persistence=True but does "
+            f"not implement get_delivery_for_tool(); cannot dispatch get_media_buy_delivery."
+        )
+
+    def get_media_buys_for_tool(
+        self,
+        req: GetMediaBuysRequest,
+        include_snapshot: bool,
+    ) -> GetMediaBuysResponse:
+        """Tool-shaped list entry for media_buy_list.
+
+        Override on adapters with ``manages_own_persistence=True``. Default
+        raises NotImplementedError so misconfigured adapters fail loudly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares manages_own_persistence=True but does "
+            f"not implement get_media_buys_for_tool(); cannot dispatch get_media_buys."
+        )
+
+    def create_media_buy_for_tool(
+        self,
+        req: CreateMediaBuyRequest,
+        testing_ctx: AdCPTestContext | None,
+    ) -> CreateMediaBuyResult:
+        """Tool-shaped create entry for media_buy_create.
+
+        Override on adapters with ``manages_own_persistence=True``. Default
+        raises NotImplementedError so misconfigured adapters fail loudly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} declares manages_own_persistence=True but does "
+            f"not implement create_media_buy_for_tool(); cannot dispatch create_media_buy."
+        )
+
+
+class AdServerAdapter(ToolProvider):
+    """Abstract base class for ad server adapters.
+
+    Extends ToolProvider with ad-server-specific concerns:
+    creative management, inventory sync, UI hooks.
+    """
 
     # Product config schema - override in subclasses (optional)
     product_config_class: type[BaseProductConfig] | None = None
@@ -209,7 +396,7 @@ class AdServerAdapter(ABC):
         self.principal_id = principal.principal_id  # For backward compatibility
         self.dry_run = dry_run
         self.creative_engine = creative_engine
-        self.tenant_id = tenant_id
+        self.tenant_id: str = tenant_id
         self.console = Console()
 
         # Set adapter_principal_id after initialization when adapter_name is available
@@ -316,87 +503,9 @@ class AdServerAdapter(ABC):
             workflow_step_id=workflow_step_id,
         )
 
-    def get_supported_pricing_models(self) -> set[str]:
-        """Return set of pricing models this adapter supports (AdCP PR #88).
-
-        Default implementation supports only CPM. Override in subclasses.
-
-        Returns:
-            Set of pricing model strings: {"cpm", "cpcv", "cpp", "cpc", "cpv", "flat_rate"}
-        """
-        return {"cpm"}
-
     def get_targeting_capabilities(self) -> TargetingCapabilities:
-        """Return targeting capabilities this adapter supports.
-
-        Default implementation returns minimal capabilities (geo country only).
-        Override in subclasses with actual adapter capabilities.
-
-        Returns:
-            TargetingCapabilities describing what targeting is supported
-        """
+        """Ad server adapters default to geo_countries=True."""
         return TargetingCapabilities(geo_countries=True)
-
-    def validate_media_buy_request(
-        self,
-        request: CreateMediaBuyRequest,
-        packages: list[MediaPackage],
-        start_time: datetime,
-        end_time: datetime,
-        package_pricing_info: dict[str, dict] | None = None,
-    ) -> list[str]:
-        """Pre-validate a media buy request without creating anything.
-
-        Called before adapter execution (including dry_run) to catch
-        adapter-specific constraint violations early. Override in
-        subclasses to add adapter-specific validation.
-
-        Default implementation validates pricing model compatibility.
-        Subclasses can override to add adapter-specific checks (e.g., impressions limits).
-
-        Returns:
-            List of error messages. Empty list means validation passed.
-        """
-        errors: list[str] = []
-        supported = self.get_supported_pricing_models()
-
-        if package_pricing_info:
-            for _pkg_id, pricing in package_pricing_info.items():
-                pricing_model = pricing.get("pricing_model", "")
-                if pricing_model and pricing_model.lower() not in supported:
-                    sorted_supported = ", ".join(sorted(s.upper() for s in supported))
-                    errors.append(
-                        f"Adapter does not support '{pricing_model}' pricing. "
-                        f"Supported pricing models: {sorted_supported}. "
-                        f"The requested pricing model ('{pricing_model}') is not available. "
-                        f"Please choose a product with compatible pricing."
-                    )
-
-        return errors
-
-    @abstractmethod
-    def create_media_buy(
-        self,
-        request: CreateMediaBuyRequest,
-        packages: list[MediaPackage],
-        start_time: datetime,
-        end_time: datetime,
-        package_pricing_info: dict[str, dict] | None = None,
-    ) -> CreateMediaBuyResponse:
-        """Creates a new media buy on the ad server from selected packages.
-
-        Args:
-            request: Full create media buy request
-            packages: Simplified package models for adapter
-            start_time: Campaign start time
-            end_time: Campaign end time
-            package_pricing_info: Optional validated pricing information per package (AdCP PR #88)
-                Maps package_id → {pricing_model, rate, currency, is_fixed, bid_price}
-
-        Returns:
-            CreateMediaBuyResponse with media buy details
-        """
-        pass
 
     @abstractmethod
     def add_creative_assets(
@@ -407,66 +516,7 @@ class AdServerAdapter(ABC):
 
     @abstractmethod
     def associate_creatives(self, line_item_ids: list[str], platform_creative_ids: list[str]) -> list[dict[str, Any]]:
-        """Associate already-uploaded creatives with line items.
-
-        This is used when buyer provides creative_ids in create_media_buy request,
-        indicating they've already synced creatives and want them associated immediately.
-
-        Args:
-            line_item_ids: Platform-specific line item IDs
-            platform_creative_ids: Platform-specific creative IDs (already uploaded via sync_creatives)
-
-        Returns:
-            List of association results with status for each combination
-            Example: [{"line_item_id": "123", "creative_id": "456", "status": "success"}]
-        """
-        pass
-
-    @abstractmethod
-    def check_media_buy_status(self, media_buy_id: str, today: datetime) -> CheckMediaBuyStatusResponse:
-        """Checks the status of a media buy on the ad server."""
-        pass
-
-    @abstractmethod
-    def get_media_buy_delivery(
-        self, media_buy_id: str, date_range: ReportingPeriod, today: datetime
-    ) -> AdapterGetMediaBuyDeliveryResponse:
-        """Gets delivery data for a media buy."""
-        pass
-
-    def get_packages_snapshot(
-        self, package_refs: list[tuple[str, str, str | None]]
-    ) -> dict[str, dict[str, Snapshot | None]]:
-        """Get near-real-time delivery snapshots for packages.
-
-        Args:
-            package_refs: List of (media_buy_id, package_id, platform_line_item_id) tuples.
-                platform_line_item_id may be None if the package was not yet pushed to the platform.
-
-        Returns:
-            Nested dict: media_buy_id -> package_id -> Snapshot (or None if unavailable).
-            Adapters that do not support snapshots should not override this method.
-        """
-        raise NotImplementedError("Snapshots not supported by this adapter")
-
-    @abstractmethod
-    def update_media_buy_performance_index(
-        self, media_buy_id: str, package_performance: list[PackagePerformance]
-    ) -> bool:
-        """Updates the performance index for packages in a media buy."""
-        pass
-
-    @abstractmethod
-    def update_media_buy(
-        self,
-        media_buy_id: str,
-        buyer_ref: str,
-        action: str,
-        package_id: str | None,
-        budget: int | None,
-        today: datetime,
-    ) -> UpdateMediaBuyResponse:
-        """Updates a media buy with a specific action."""
+        """Associate already-uploaded creatives with line items."""
         pass
 
     def get_config_ui_endpoint(self) -> str | None:

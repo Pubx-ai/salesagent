@@ -476,6 +476,11 @@
             <span>Integrations</span>
         </a>
 
+        <a class="settings-nav-item" data-section="pubx-integration">
+            <span class="settings-nav-icon">🎯</span>
+            <span>Pubx Curation</span>
+        </a>
+
         <div class="settings-nav-separator"></div>
 
         <a class="settings-nav-item" data-section="publishers">
@@ -851,12 +856,14 @@
                         <h4>Triton Digital</h4>
                         <p>Audio and podcast advertising platform</p>
                     </div>
+
                 </div>
             </div>
 
             <!-- Adapter-specific configuration loaded from adapter templates -->
+            <!-- Curation config is in the Pubx Curation section, not here -->
             <div id="adapter-config">
-                {% if active_adapter %}
+                {% if active_adapter and active_adapter != 'curation' %}
                 {% include "adapters/" ~ active_adapter ~ "/connection_config.html" ignore missing %}
                 {% endif %}
 
@@ -2262,6 +2269,7 @@ Exclude any products that don't match the brand's tone.</pre>
                 {% set has_ai = ai_config.get('api_key') or tenant.gemini_api_key %}
                 {% set current_provider = ai_config.get('provider', 'gemini') %}
                 {% set current_model = ai_config.get('model', '') %}
+                {% set current_fallback_models = ai_config.get('fallback_models', []) %}
 
                 {% if not has_ai %}
                 <div class="alert alert-warning" style="padding: 0.75rem; background: #fef3c7; border: 1px solid #fbbf24; border-radius: 6px; margin-bottom: 1rem;">
@@ -2296,10 +2304,20 @@ Exclude any products that don't match the brand's tone.</pre>
 
                     <div class="form-group">
                         <label for="ai_model">Model</label>
-                        <select id="ai_model" name="ai_model">
-                            <option value="">Select a provider first</option>
-                        </select>
+                        <div id="ai_model_container">
+                            <select id="ai_model" name="ai_model">
+                                <option value="">Select a provider first</option>
+                            </select>
+                        </div>
                         <small>Select the specific model to use. <span id="model-count"></span></small>
+                    </div>
+
+                    <div class="form-group" id="fallback_models_group" style="display: none;">
+                        <label for="fallback_models">Fallback Models (optional)</label>
+                        <input type="text" id="fallback_models" name="fallback_models"
+                               value="{{ current_fallback_models | join(', ') if current_fallback_models else '' }}"
+                               placeholder="e.g. openai/gpt-4o, google/gemini-2.0-flash">
+                        <small>Comma-separated list of models to try if the primary model fails. Only available with Vercel AI Gateway.</small>
                     </div>
 
                     <div class="form-group">
@@ -2343,13 +2361,15 @@ Exclude any products that don't match the brand's tone.</pre>
                 const currentProvider = '{{ current_provider }}';
                 const currentModel = '{{ current_model }}';
                 let aiModelsData = null;
+                const currentFallbackModels = {{ (current_fallback_models | join(", ")) | tojson }};
 
                 // Preferred order for providers (most common first)
                 const providerOrder = [
                     'google-gla', 'anthropic', 'openai', 'groq', 'mistral', 'deepseek', 'grok',
                     'cohere', 'bedrock', 'google-vertex', 'huggingface', 'cerebras', 'moonshotai', 'heroku',
                     // Gateway providers at the end
-                    'gateway/anthropic', 'gateway/openai', 'gateway/bedrock', 'gateway/google-vertex', 'gateway/groq'
+                    'gateway/anthropic', 'gateway/openai', 'gateway/bedrock', 'gateway/google-vertex', 'gateway/groq',
+                    'vercel'
                 ];
 
                 async function loadAIModels() {
@@ -2383,7 +2403,9 @@ Exclude any products that don't match the brand's tone.</pre>
                             const info = aiModelsData[provider];
                             const option = document.createElement('option');
                             option.value = provider;
-                            option.textContent = info.name + ' (' + info.models.length + ' models)';
+                            option.textContent = info.models.length > 0
+                                ? info.name + ' (' + info.models.length + ' models)'
+                                : info.name;
                             if (provider === currentProvider || (currentProvider === 'gemini' && provider === 'google-gla')) {
                                 option.selected = true;
                             }
@@ -2416,28 +2438,50 @@ Exclude any products that don't match the brand's tone.</pre>
                     if (!aiModelsData) return;
 
                     const provider = document.getElementById('ai_provider').value;
-                    const modelSelect = document.getElementById('ai_model');
+                    const container = document.getElementById('ai_model_container');
                     const apiKeyLink = document.getElementById('api-key-link');
 
                     if (!provider || !aiModelsData[provider]) {
-                        modelSelect.innerHTML = '<option value="">Select a provider first</option>';
+                        const select = document.createElement('select');
+                        select.id = 'ai_model';
+                        select.name = 'ai_model';
+                        const placeholder = document.createElement('option');
+                        placeholder.value = '';
+                        placeholder.textContent = 'Select a provider first';
+                        select.appendChild(placeholder);
+                        container.replaceChildren(select);
+                        document.getElementById('model-count').textContent = '';
                         return;
                     }
 
                     const providerInfo = aiModelsData[provider];
-                    modelSelect.innerHTML = '';
+                    const models = providerInfo.models || [];
 
-                    providerInfo.models.forEach(model => {
-                        const option = document.createElement('option');
-                        option.value = model;
-                        option.textContent = model;
-                        if (model === currentModel) {
-                            option.selected = true;
-                        }
-                        modelSelect.appendChild(option);
-                    });
-
-                    document.getElementById('model-count').textContent = providerInfo.models.length + ' models available';
+                    if (models.length === 0) {
+                        // Free-text input for providers with dynamic model lists (e.g. Vercel)
+                        const input = document.createElement('input');
+                        input.type = 'text';
+                        input.id = 'ai_model';
+                        input.name = 'ai_model';
+                        input.value = (provider === currentProvider) ? currentModel : '';
+                        input.placeholder = 'e.g. anthropic/claude-sonnet-4-5';
+                        container.replaceChildren(input);
+                        document.getElementById('model-count').textContent = 'Enter model name manually';
+                    } else {
+                        // Dropdown for providers with known model lists
+                        const select = document.createElement('select');
+                        select.id = 'ai_model';
+                        select.name = 'ai_model';
+                        models.forEach(function(model) {
+                            const option = document.createElement('option');
+                            option.value = model;
+                            option.textContent = model;
+                            option.selected = (model === currentModel);
+                            select.appendChild(option);
+                        });
+                        container.replaceChildren(select);
+                        document.getElementById('model-count').textContent = providerInfo.models.length + ' models available';
+                    }
 
                     // Update API key link
                     if (providerInfo.key_url) {
@@ -2446,6 +2490,12 @@ Exclude any products that don't match the brand's tone.</pre>
                         apiKeyLink.textContent = 'Get ' + providerInfo.name + ' key';
                     } else {
                         apiKeyLink.style.display = 'none';
+                    }
+
+                    // Show/hide fallback models field (Vercel only)
+                    const fallbackGroup = document.getElementById('fallback_models_group');
+                    if (fallbackGroup) {
+                        fallbackGroup.style.display = (provider === 'vercel') ? '' : 'none';
                     }
                 }
 
@@ -2611,6 +2661,40 @@ Exclude any products that don't match the brand's tone.</pre>
                     </p>
                 </div>
             </div>
+        </div>
+
+        <!-- Pubx Curation Integration -->
+        <div id="pubx-integration" class="settings-section">
+            <div class="settings-header">
+                <h2>Pubx Curation</h2>
+                <p>Connect to Pubx curation services for audience segment discovery, deal creation, and SSP activation</p>
+            </div>
+
+            {% if active_adapter == 'curation' %}
+            <div class="status-card success">
+                <strong>✅ Curation services connected</strong>
+            </div>
+            {% else %}
+            <div class="status-card" style="background: #eff6ff; border-left: 4px solid #3b82f6; padding: 1rem; margin-bottom: 1.5rem;">
+                <p style="margin: 0; font-size: 0.875rem;">
+                    Enable curation to use external Catalog, Sales, and Activation services
+                    instead of a traditional ad server. This replaces the ad server integration entirely.
+                </p>
+                <button type="button" onclick="selectAdapter('curation')" class="btn btn-primary" style="margin-top: 0.75rem;">
+                    Enable Curation
+                </button>
+            </div>
+            {% endif %}
+
+            {% if active_adapter == 'curation' %}
+            {% include "adapters/curation/connection_config.html" ignore missing %}
+
+            <div class="form-section" style="margin-top: 1.5rem;">
+                <button type="button" onclick="if(confirm('This will switch back to the default Mock adapter. Continue?')) selectAdapter('mock')" class="btn btn-secondary" style="color: #dc2626; border-color: #dc2626;">
+                    Disable Curation
+                </button>
+            </div>
+            {% endif %}
         </div>
 
         <!-- API Settings -->

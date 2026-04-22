@@ -1,14 +1,41 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(pnpm lint *)",
+      "Bash(bun test *)",
+      "Bash(pnpm test:unit *)"
+    ]
+  },
   "hooks": {
-    "SessionStart": [
+    "PreCompact": [
       {
-        "matcher": "",
         "hooks": [
           {
-            "type": "command",
-            "command": "test -d .agent-index && echo '[agent-index] .pyi stubs present — use ast-grep for live queries' || echo '[agent-index] run: uv run python scripts/gen-agent-index.py'"
+            "command": "bd prime",
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": ""
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "test -d .agent-index \u0026\u0026 echo '[agent-index] .pyi stubs present — use ast-grep for live queries' || echo '[agent-index] run: uv run python scripts/gen-agent-index.py'",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "bd prime",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ]
   }

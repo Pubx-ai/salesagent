@@ -26,6 +26,7 @@ from src.core.database.models import Product as ModelProduct
 from src.core.database.models import (
     WorkflowStep,
 )
+from src.core.helpers.adapter_helpers import _coerce_adapter_type
 
 # Schema models (explicit imports to avoid collisions)
 # Schema adapters (wrapping generated schemas)
@@ -164,9 +165,12 @@ from src.core.context_manager import ContextManager
 context_mgr = ContextManager()
 
 # --- Adapter Configuration ---
-# Get adapter from config, fallback to mock
-SELECTED_ADAPTER = ((config.get("ad_server", {}).get("adapter") or "mock") if config else "mock").lower()
-AVAILABLE_ADAPTERS = ["mock", "gam", "kevel", "triton", "triton_digital"]
+# Get adapter from config, fallback to mock. ``_coerce_adapter_type`` handles
+# both shapes the field can take (bare string or ``{"adapter": ...}`` dict)
+# and keeps this resolution in lockstep with the per-tenant path in
+# ``get_adapter`` / ``adapter_manages_own_persistence``.
+SELECTED_ADAPTER = _coerce_adapter_type(config.get("ad_server") if config else None)
+AVAILABLE_ADAPTERS = ["mock", "gam", "kevel", "triton", "triton_digital", "curation"]
 
 # --- In-Memory State (already initialized above, just adding context_map) ---
 context_map: dict[str, str] = {}  # Maps context_id to media_buy_id

@@ -55,3 +55,27 @@ class TenantConfigRepository:
         """Get the adapter configuration for the tenant, or None if not configured."""
         stmt = select(AdapterConfig).filter_by(tenant_id=self._tenant_id)
         return self._session.scalars(stmt).first()
+
+    def seed_ranking_prompt_if_unset(self, prompt: str) -> bool:
+        """Write ``prompt`` to the tenant's ``product_ranking_prompt`` column
+        if the current value is null or empty. Idempotent.
+
+        Commits the session when a write happens. Callers that want to
+        orchestrate a larger transaction should open their own session and
+        commit themselves instead of using this helper.
+
+        Args:
+            prompt: The prompt text to seed.
+
+        Returns:
+            True if the prompt was seeded, False if a non-empty value was
+            preserved or the tenant row doesn't exist.
+        """
+        tenant = self.get_tenant()
+        if tenant is None:
+            return False
+        if tenant.product_ranking_prompt:
+            return False
+        tenant.product_ranking_prompt = prompt
+        self._session.commit()
+        return True

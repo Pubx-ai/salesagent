@@ -58,6 +58,7 @@ class TenantContext(BaseModel):
     brand_manifest_policy: str = "require_auth"
     advertising_policy: dict[str, Any] | None = None
     product_ranking_prompt: str | None = None
+    ai_config: dict[str, Any] | None = None
 
     # --- Dict-like access for backward compatibility ---
 

@@ -46,6 +46,11 @@ KNOWN_EMPTY_DOWNGRADE = {
     "017_handle_partial_schemas.py",
     # Legacy: fixes JSON encoding, no structural revert
     "e81e275c9b29_fix_price_guidance_json_encoding.py",
+    # Data-only: backfills curation ranking prompts; downgrade cannot distinguish
+    # seeded values from operator customizations that happen to equal the default,
+    # so a revert would clobber real user data. See the migration's downgrade()
+    # docstring for the rationale.
+    "df7866e6dc89_backfill_curation_ranking_prompt.py",
 }
 
 KNOWN_DOWNGRADE_COVERAGE_GAPS = {

@@ -30,6 +30,10 @@ class TenantAIConfig(BaseModel):
     # API key (encrypted in database, decrypted when loaded)
     api_key: str | None = None
 
+    # Fallback models for providers that support it (e.g., Vercel AI Gateway)
+    # Models are tried in order if the primary model fails
+    fallback_models: list[str] | None = None
+
     # Observability
     logfire_token: str | None = None
 
@@ -66,6 +70,7 @@ def _get_provider_api_key(provider: str) -> str | None:
         "anthropic": "ANTHROPIC_API_KEY",
         "groq": "GROQ_API_KEY",
         "bedrock": "AWS_ACCESS_KEY_ID",  # Bedrock uses AWS credentials
+        "vercel": "VERCEL_AI_GATEWAY_API_KEY",
     }
     env_var = provider_env_vars.get(provider)
     if env_var:

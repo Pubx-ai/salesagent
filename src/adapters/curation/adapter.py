@@ -1,0 +1,1173 @@
+"""CurationAdapter -- bridges ToolProvider to external curation services.
+
+This adapter is the sole source of truth for curation tenants.
+No data is persisted in the Prebid Sales Agent PostgreSQL database.
+
+Extends ToolProvider directly (not AdServerAdapter) because curation
+is not an ad server -- it manages audience segments, sale records,
+and SSP deal activations via external HTTP services.
+"""
+
+from __future__ import annotations
+
+import json as _json
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.core.schemas import (
+        CreateMediaBuyResult,
+        GetMediaBuyDeliveryRequest,
+        GetMediaBuyDeliveryResponse,
+        GetMediaBuysRequest,
+        GetMediaBuysResponse,
+    )
+    from src.core.schemas import ReportingPeriod as MediaBuyReportingPeriod
+    from src.core.testing_hooks import AdCPTestContext
+
+from adcp.types.aliases import Package as ResponsePackage
+from adcp.types.generated_poc.enums.media_buy_status import MediaBuyStatus
+
+from src.adapters.base import (
+    AdapterCapabilities,
+    BaseConnectionConfig,
+    ToolProvider,
+)
+from src.adapters.curation._dt import parse_iso
+from src.adapters.curation._helpers import (
+    _build_creative_assignments,
+    _dsps_from_ext_dict,
+    _ext_as_dict,
+    _extract_dsps_from_ext,
+    _extract_pricing,
+)
+from src.adapters.curation.activation_client import ActivationClient
+from src.adapters.curation.catalog_client import CatalogClient
+from src.adapters.curation.config import CurationConnectionConfig
+from src.adapters.curation.sales_client import SalesClient
+from src.adapters.curation.segment_converter import DEFAULT_PUBLISHER_DOMAIN, segments_to_products
+from src.adapters.curation.status_mapping import (
+    ACTION_TO_ADCP_STATUS,
+    ACTION_TO_SALE_STATUS,
+    SALE_STATUS_TO_ADCP,
+)
+from src.core.exceptions import AdCPAdapterError, AdCPNotFoundError, AdCPValidationError
+from src.core.schemas import (
+    AdapterGetMediaBuyDeliveryResponse,
+    CheckMediaBuyStatusResponse,
+    CreateMediaBuyRequest,
+    CreateMediaBuyResponse,
+    CreateMediaBuySuccess,
+    DeliveryTotals,
+    GetMediaBuysMediaBuy,
+    GetMediaBuysPackage,
+    MediaPackage,
+    PackagePerformance,
+    Principal,
+    ReportingPeriod,
+    UpdateMediaBuyResponse,
+    UpdateMediaBuySuccess,
+)
+from src.core.schemas.product import Product
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ListMediaBuysResult:
+    """Result of CurationAdapter.list_media_buys().
+
+    Attributes:
+        media_buys: Mapped AdCP media buys (one per sale in the result set).
+        truncated: True if the fetch-all loop hit the safety cap before
+            exhausting pages. The caller appends a soft errors[] entry so
+            clients see the signal.
+        total_fetched: Number of sales actually converted into media buys.
+    """
+
+    media_buys: list[GetMediaBuysMediaBuy]
+    truncated: bool
+    total_fetched: int
+
+
+class CurationAdapter(ToolProvider):
+    """Adapter bridging AdCP tools to external curation services.
+
+    Instead of managing line items on an ad server, this adapter:
+    - Fetches audience segments from a Catalog service (as products)
+    - Creates sale records in a Sales service (as media buys)
+    - Triggers SSP deal activation via an Activation service
+    """
+
+    adapter_name = "curation"
+    manages_own_persistence = True
+
+    # Widened from the base class ``principal: Principal`` — curation supports
+    # anonymous callers (public product catalog) because the external catalog,
+    # not the principal, is the source of truth. CurationAdapter never reads
+    # ``self.principal`` in any method.
+    principal: Principal | None  # type: ignore[assignment]
+
+    @classmethod
+    def on_config_saved(cls, tenant_id: str) -> None:
+        """Seed ``tenant.product_ranking_prompt`` with the curation default.
+
+        Replaces the runtime fallback branch that used to live in
+        ``_get_products_impl``. Only seeds when the prompt is null or empty;
+        any non-empty value (including an operator's deliberate edit) is
+        preserved. Called from ``save_adapter_config`` after the adapter
+        config write commits.
+        """
+        from src.adapters.curation.ranking import DEFAULT_CURATION_RANKING_PROMPT
+        from src.core.database.database_session import get_db_session
+        from src.core.database.repositories.tenant_config import TenantConfigRepository
+
+        with get_db_session() as session:
+            repo = TenantConfigRepository(session, tenant_id)
+            seeded = repo.seed_ranking_prompt_if_unset(DEFAULT_CURATION_RANKING_PROMPT)
+            if seeded:
+                logger.info(
+                    "Seeded default curation ranking prompt for tenant %s",
+                    tenant_id,
+                )
+            else:
+                logger.debug(
+                    "on_config_saved: prompt already set (or tenant missing) for %s",
+                    tenant_id,
+                )
+
+    default_channels = ["display"]
+    default_delivery_measurement = {"provider": "curation"}
+
+    connection_config_class: type[BaseConnectionConfig] | None = CurationConnectionConfig
+
+    capabilities = AdapterCapabilities(
+        supports_inventory_sync=False,
+        supports_inventory_profiles=False,
+        inventory_entity_label="Segments",
+        supports_custom_targeting=False,
+        supports_geo_targeting=False,
+        supports_dynamic_products=False,
+        supported_pricing_models=["cpm"],
+        supports_webhooks=False,
+        supports_realtime_reporting=False,
+    )
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        principal: Principal | None,
+        dry_run: bool = False,
+        creative_engine: Any = None,
+        tenant_id: str | None = None,
+    ):
+        if not tenant_id:
+            raise ValueError("tenant_id is required for CurationAdapter initialization.")
+
+        self.config = config
+        self.principal = principal
+        self.dry_run = dry_run
+        self.tenant_id = tenant_id
+
+        self.manual_approval_required = config.get("manual_approval_required", False)
+        self.manual_approval_operations: set[str] = set(config.get("manual_approval_operations", []))
+
+        conn = CurationConnectionConfig(
+            **{k: v for k, v in config.items() if k in CurationConnectionConfig.model_fields}
+        )
+        timeout = conn.http_timeout_seconds
+
+        self._catalog = CatalogClient(conn.catalog_service_url, timeout=timeout)
+        self._sales = SalesClient(conn.sales_service_url, timeout=timeout)
+        self._activation = ActivationClient(conn.activation_service_url, timeout=timeout)
+
+        self._pricing_multiplier = conn.pricing_multiplier
+        self._pricing_floor_cpm = conn.pricing_floor_cpm
+        self._pricing_max_suggested_cpm = conn.pricing_max_suggested_cpm
+        self._publisher_domain = config.get("publisher_domain") or DEFAULT_PUBLISHER_DOMAIN
+        self._mock_activation = conn.mock_activation
+        self._max_media_buys_per_list = conn.max_media_buys_per_list
+
+    # ── Product catalog ────────────────────────────────────────────────
+
+    def get_product_catalog(self, tenant_id: str) -> list[Product] | None:
+        """Fetch segments from Catalog and return as AdCP Products."""
+        segments = self._catalog.fetch_all_segments()
+        return segments_to_products(
+            segments,
+            pricing_multiplier=self._pricing_multiplier,
+            pricing_floor_cpm=self._pricing_floor_cpm,
+            pricing_max_suggested_cpm=self._pricing_max_suggested_cpm,
+            publisher_domain=self._publisher_domain,
+        )
+
+    # ── Create media buy (sale + activation) ───────────────────────────
+
+    def create_media_buy(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> CreateMediaBuyResponse:
+        """Create a sale + activation in curation services."""
+        # Verbose request-shape logging is only useful when actively debugging a
+        # specific media buy; keep it off the INFO hot path.
+        if logger.isEnabledFor(logging.DEBUG):
+            brand = getattr(request, "brand", None)
+            logger.debug(
+                "create_media_buy input: buyer_ref=%s, brand=%r, start=%s, end=%s, "
+                "po_number=%s, account=%s, packages=%d, ext=%s",
+                request.buyer_ref,
+                {"domain": getattr(brand, "domain", None)} if brand else None,
+                start_time,
+                end_time,
+                getattr(request, "po_number", None),
+                getattr(request, "account", None),
+                len(packages),
+                _ext_as_dict(request) or None,
+            )
+            for i, pkg in enumerate(packages):
+                targeting = getattr(pkg, "targeting_overlay", None)
+                targeting_summary = None
+                if targeting:
+                    if isinstance(targeting, dict):
+                        targeting_summary = targeting
+                    elif hasattr(targeting, "model_dump"):
+                        targeting_summary = targeting.model_dump(mode="json", exclude_none=True)
+                logger.debug(
+                    "  package[%d]: product_id=%s, budget=%s, bid_price=%s, cpm=%s, "
+                    "format_ids=%s, creative_ids=%s, targeting_overlay=%s",
+                    i,
+                    pkg.product_id,
+                    pkg.budget,
+                    pkg.cpm if pkg.cpm else None,
+                    pkg.cpm,
+                    [getattr(f, "id", f) for f in (pkg.format_ids or [])],
+                    getattr(pkg, "creative_ids", None),
+                    targeting_summary,
+                )
+            if package_pricing_info:
+                for pkg_id, info in package_pricing_info.items():
+                    logger.debug(
+                        "  pricing[%s]: rate=%s, bid_price=%s, currency=%s, pricing_option_id=%s, is_fixed=%s",
+                        pkg_id,
+                        info.get("rate"),
+                        info.get("bid_price"),
+                        info.get("currency"),
+                        info.get("pricing_option_id"),
+                        info.get("is_fixed"),
+                    )
+
+        ext_dict = _ext_as_dict(request)
+        use_deal = ext_dict.get("sale_type") == "deal" or bool(_dsps_from_ext_dict(ext_dict))
+
+        if use_deal:
+            sale_data = self._build_deal_sale_data(request, packages, start_time, end_time, package_pricing_info)
+        else:
+            sale_data = self._build_campaign_sale_data(request, packages, start_time, end_time, package_pricing_info)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Sale payload to send: %s", _json.dumps(sale_data, default=str))
+        sale_resp = self._sales.create_sale(sale_data)
+        sale_id = sale_resp.get("sale_id")
+        if not sale_id:
+            raise AdCPAdapterError("Sales service did not return a sale_id")
+        logger.info("Created sale %s (%s) in Sales service", sale_id, sale_data.get("sale_type", "deal"))
+
+        activation_id = self._activate_sale(sale_id, sale_data)
+
+        pkg_responses = [
+            ResponsePackage(buyer_ref=p.buyer_ref or "unknown", package_id=p.package_id, paused=activation_id is None)
+            for p in packages
+        ]
+        creative_deadline = datetime.now(UTC) + timedelta(days=2)
+
+        return CreateMediaBuySuccess(
+            buyer_ref=request.buyer_ref or "unknown",
+            media_buy_id=sale_id,
+            creative_deadline=creative_deadline,
+            packages=pkg_responses,
+        )
+
+    def create_media_buy_for_tool(
+        self,
+        req: CreateMediaBuyRequest,
+        testing_ctx: AdCPTestContext | None,
+    ) -> CreateMediaBuyResult:
+        """Tool-shaped create entry for media_buy_create.
+
+        Validates request-level invariants that the Postgres path would
+        otherwise enforce (non-empty packages, buyer_ref, well-formed inline
+        creatives), builds the MediaPackage list the adapter's
+        create_media_buy expects, then delegates. Wraps the response in a
+        CreateMediaBuyResult with the right task status.
+
+        Replaces the early-return block + _build_packages_for_external_adapter
+        + _validate_inline_creatives_for_external_adapter helpers that used to
+        live in src/core/tools/media_buy_create.py.
+        """
+        from src.core.schemas import CreateMediaBuyResult
+        from src.core.tools.media_buy_create import (
+            AdcpTaskStatus,
+            _build_package_pricing_info,
+            _parse_request_times,
+        )
+
+        if not req.packages:
+            raise AdCPValidationError("CreateMediaBuyRequest.packages must contain at least one package")
+        if not req.buyer_ref:
+            raise AdCPValidationError("CreateMediaBuyRequest.buyer_ref is required")
+
+        self._validate_inline_creatives(req)
+
+        ext_packages = self._build_adapter_packages(req)
+        start_time, end_time = _parse_request_times(req)
+        pkg_pricing = _build_package_pricing_info(req)
+
+        response = self.create_media_buy(req, ext_packages, start_time, end_time, pkg_pricing)
+        status = (
+            AdcpTaskStatus.completed.value
+            if isinstance(response, CreateMediaBuySuccess)
+            else AdcpTaskStatus.failed.value
+        )
+        return CreateMediaBuyResult(response=response, status=status)
+
+    def _validate_inline_creatives(self, req: CreateMediaBuyRequest) -> None:
+        """Fail fast on malformed inline creatives before they reach the adapter.
+
+        The Postgres-backed path runs inline creatives through
+        ``process_and_upload_package_creatives``, which validates structure and
+        substitutes server-assigned IDs. This adapter-managed path skips that
+        preprocessing, so without a check here, malformed inline creatives
+        reach the external Sales service with empty ``creative_id`` and no
+        ``format_id``, producing junk assignments that are hard to trace back.
+
+        Required shape per inline creative:
+            - ``format_id`` must be present.
+            - Must have EITHER a ``creative_id`` (library reference) OR a
+              non-empty ``tag``/``snippet``/``assets.snippet`` (inline content).
+
+        Raises:
+            AdCPValidationError: The first malformed creative found; the
+                message points at the offending ``packages[i].creatives[j]``
+                coordinate so the caller can fix the request.
+        """
+        for i, pkg in enumerate(req.packages or []):
+            inline = getattr(pkg, "creatives", None) or []
+            for j, c in enumerate(inline):
+                coord = f"packages[{i}].creatives[{j}]"
+                if not getattr(c, "format_id", None):
+                    raise AdCPValidationError(f"{coord}.format_id is required for inline creatives on curation tenants")
+                assets = getattr(c, "assets", None)
+                assets_snippet = None
+                if assets is not None:
+                    assets_snippet = (
+                        assets.get("snippet") if isinstance(assets, dict) else getattr(assets, "snippet", None)
+                    )
+                has_content = getattr(c, "tag", None) or getattr(c, "snippet", None) or assets_snippet
+                if not getattr(c, "creative_id", None) and not has_content:
+                    raise AdCPValidationError(f"{coord} must carry either creative_id or inline tag/snippet content")
+
+    def _build_adapter_packages(self, req: CreateMediaBuyRequest) -> list[MediaPackage]:
+        """Build the MediaPackage list this adapter's create_media_buy expects.
+
+        Inline ``package.creatives`` are intentionally NOT copied onto
+        MediaPackage — this adapter reads them directly from
+        ``request.packages`` via ``_build_creative_assignments`` so they still
+        reach the Sales service. See :meth:`_validate_inline_creatives` for
+        the fail-fast check run before we get here.
+        """
+        from adcp.types.generated_poc.core.format_id import FormatId as LibraryFormatId
+
+        packages: list[MediaPackage] = []
+        for i, pkg in enumerate(req.packages or []):
+            product_id = getattr(pkg, "product_id", "unknown")
+            bid_price = getattr(pkg, "bid_price", None)
+            budget = getattr(pkg, "budget", None)
+            creative_ids = getattr(pkg, "creative_ids", None)
+            targeting_overlay = getattr(pkg, "targeting_overlay", None)
+
+            pkg_format_ids = getattr(pkg, "format_ids", None)
+            if pkg_format_ids:
+                format_ids = list(pkg_format_ids)
+            else:
+                format_ids = [LibraryFormatId(id="display_banner", agent_url="https://creative.adcontextprotocol.org")]
+
+            packages.append(
+                MediaPackage(
+                    package_id=getattr(pkg, "package_id", None) or f"pkg_{product_id}_{i}",
+                    name=f"Package for {product_id}",
+                    delivery_type="non_guaranteed",
+                    cpm=float(bid_price) if bid_price else 0.0,
+                    impressions=0,
+                    format_ids=format_ids,
+                    product_id=product_id,
+                    buyer_ref=getattr(pkg, "buyer_ref", None),
+                    budget=float(budget) if budget else None,
+                    creative_ids=creative_ids,
+                    targeting_overlay=targeting_overlay,
+                )
+            )
+        return packages
+
+    def _build_campaign_sale_data(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> dict[str, Any]:
+        """Build a campaign-type sale payload for the Sales service."""
+        brand = getattr(request, "brand", None)
+        brand_domain = ""
+        if brand:
+            brand_domain = getattr(brand, "domain", "") or ""
+
+        # Build a lookup from product_id → request package for fields not on MediaPackage
+        req_pkg_by_product: dict[str, Any] = {}
+        for req_pkg in request.packages or []:
+            pid = getattr(req_pkg, "product_id", None)
+            if pid:
+                req_pkg_by_product[pid] = req_pkg
+
+        # Per-segment catalog lookup for domain enrichment; tolerate misses so a
+        # single 404/outage doesn't block the sale, but only swallow the curation
+        # adapter's own typed errors — real bugs should propagate.
+        #
+        # With 2+ distinct segments, paginate the full catalog once and let
+        # CatalogClient's _segment_cache serve the per-package lookups. That
+        # collapses the historical N+1 GET /segments/{id} pattern into a
+        # single walk of GET /segments?cursor=...
+        distinct_product_ids = {pkg.product_id for pkg in packages if pkg.product_id}
+        if len(distinct_product_ids) > 1:
+            try:
+                self._catalog.fetch_all_segments()
+            except (AdCPNotFoundError, AdCPAdapterError) as e:
+                logger.warning(
+                    "Bulk catalog warm-up failed, falling back to per-segment GETs: %s",
+                    e,
+                )
+
+        catalog_by_id: dict[str, dict[str, Any]] = {}
+        for pkg in packages:
+            if pkg.product_id and pkg.product_id not in catalog_by_id:
+                try:
+                    seg_data = self._catalog.fetch_segment_by_id(pkg.product_id)
+                    catalog_by_id[pkg.product_id] = seg_data
+                except (AdCPNotFoundError, AdCPAdapterError) as e:
+                    logger.warning(
+                        "Could not fetch catalog segment %s for domain enrichment: %s",
+                        pkg.product_id,
+                        e,
+                    )
+
+        segments: list[dict[str, Any]] = []
+        for pkg in packages:
+            pricing_info_dict = (package_pricing_info or {}).get(pkg.package_id, {})
+            rate = pricing_info_dict.get("rate") or pricing_info_dict.get("bid_price")
+            currency = pricing_info_dict.get("currency", "USD")
+            pricing_model = pricing_info_dict.get("pricing_model", "cpm")
+            is_fixed = pricing_info_dict.get("is_fixed", False)
+
+            orig_pkg = req_pkg_by_product.get(pkg.product_id or "")
+            pricing_option_id = getattr(orig_pkg, "pricing_option_id", None) if orig_pkg else None
+            if not pricing_option_id:
+                pricing_option_id = pricing_info_dict.get("pricing_option_id")
+
+            # TODO(pubx): Fallback uses raw floor CPM ($0.10) when buyer doesn't
+            # send bid_price. Consider using the segment's recommended price
+            # (avg_cpm × pricing_multiplier) instead, which is what the buyer
+            # sees in get_products. This would require fetching catalog estimation
+            # data per segment here. Current behavior is intentional for now.
+            if rate is None:
+                rate = self._pricing_floor_cpm
+                logger.debug(
+                    "No bid_price for %s, using floor CPM %.2f",
+                    pkg.product_id,
+                    rate,
+                )
+
+            ad_format_types: list[str] = []
+            for fmt in getattr(pkg, "format_ids", None) or []:
+                fmt_id = fmt.get("id") if isinstance(fmt, dict) else getattr(fmt, "id", None)
+                if fmt_id:
+                    ad_format_types.append(str(fmt_id))
+
+            # Serialize targeting_overlay (includes geo, device, browser, frequency_cap)
+            targeting_overlay = None
+            targeting = getattr(pkg, "targeting_overlay", None)
+            if targeting:
+                if isinstance(targeting, dict):
+                    targeting_overlay = targeting
+                elif hasattr(targeting, "model_dump"):
+                    targeting_overlay = targeting.model_dump(mode="json", exclude_none=True)
+
+            # Build creative_assignments from request package creatives (full objects)
+            # or fall back to creative_ids (string references)
+            creative_assignments = _build_creative_assignments(pkg, orig_pkg)
+
+            pricing_info: dict[str, Any] | None = None
+            if rate:
+                pricing_info = {"rate": float(rate), "currency": currency}
+                if pricing_model:
+                    pricing_info["pricing_model"] = pricing_model
+                if pricing_option_id:
+                    pricing_info["pricing_option_id"] = pricing_option_id
+                if is_fixed:
+                    pricing_info["is_fixed"] = is_fixed
+
+            # Enrich domains from catalog metadata
+            cat_seg = catalog_by_id.get(pkg.product_id or "")
+            domains = (cat_seg.get("metadata") or {}).get("domains", []) if cat_seg else []
+
+            segments.append(
+                {
+                    "segment_id": pkg.product_id,
+                    "product_id": pkg.product_id,
+                    "domains": domains,
+                    "ad_format_types": ad_format_types,
+                    "budget": float(pkg.budget) if pkg.budget else None,
+                    "pricing_info": pricing_info,
+                    "creative_assignments": creative_assignments,
+                    "publishers": [],
+                    "targeting_overlay": targeting_overlay,
+                }
+            )
+
+        buyer_ref = request.buyer_ref or "unknown"
+        order_name = f"{brand_domain}-{buyer_ref}" if brand_domain else buyer_ref
+        campaign_meta: dict[str, Any] = {
+            "order_name": order_name,
+            "media_buy_id": "",
+        }
+        po_number = getattr(request, "po_number", None)
+        if po_number:
+            campaign_meta["po_number"] = po_number
+        account = getattr(request, "account", None)
+        if account:
+            account_id = getattr(account, "account_id", None) or getattr(account, "id", None)
+            if account_id:
+                campaign_meta["account_id"] = str(account_id)
+
+        sale_data: dict[str, Any] = {
+            "sale_type": "campaign",
+            "buyer_ref": request.buyer_ref or "unknown",
+            "buyer_campaign_ref": request.buyer_ref or "",
+            "campaign_meta": campaign_meta,
+            "segments": segments,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+        }
+        if brand_domain:
+            sale_data["brand"] = {"domain": brand_domain}
+        budget = getattr(request, "budget", None)
+        if budget is not None:
+            sale_data["budget"] = float(budget)
+        else:
+            total = sum(float(pkg.budget) for pkg in packages if pkg.budget)
+            if total > 0:
+                sale_data["budget"] = total
+        return sale_data
+
+    def _build_deal_sale_data(
+        self,
+        request: CreateMediaBuyRequest,
+        packages: list[MediaPackage],
+        start_time: datetime,
+        end_time: datetime,
+        package_pricing_info: dict[str, dict] | None = None,
+    ) -> dict[str, Any]:
+        """Build a deal-type sale payload for the Sales service."""
+        segment_refs = [{"segment_id": pkg.product_id} for pkg in packages]
+        pricing_info = _extract_pricing(package_pricing_info)
+        dsps = _extract_dsps_from_ext(request) or [{"seat_id": "default", "dsp_name": "Default DSP"}]
+        sale_data: dict[str, Any] = {
+            "buyer_ref": request.buyer_ref or "unknown",
+            "segments": segment_refs,
+            "pricing": {
+                "pricing_model": "cpm",
+                "currency": pricing_info.get("currency", "USD"),
+                "floor_price": pricing_info.get("floor_price"),
+                "fixed_price": pricing_info.get("fixed_price"),
+            },
+            "deal_type": "curated",
+            "platform_id": "magnite",
+            "dsps": dsps,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+        }
+        if request.buyer_ref:
+            sale_data["buyer_campaign_ref"] = request.buyer_ref
+        budget = getattr(request, "budget", None)
+        if budget is not None:
+            sale_data["budget"] = float(budget)
+        return sale_data
+
+    def _activate_sale(self, sale_id: str, sale_data: dict[str, Any]) -> str | None:
+        """Activate a sale via the Activation service, or mock it.
+
+        Returns an activation identifier on success, None on failure.
+        Updates the sale status in the Sales service if activation succeeds.
+        """
+        is_campaign = sale_data.get("sale_type") == "campaign"
+        activation_id: str | None = None
+
+        if self._mock_activation:
+            mock_id = f"mock-{uuid.uuid4().hex[:8]}"
+            activation_id = mock_id
+            logger.info("Mock activation for sale %s: id=%s", sale_id, mock_id)
+
+            if is_campaign:
+                activation_record: dict[str, Any] = {
+                    "activation_id": mock_id,
+                    "activation_target": "GAM",
+                    "gam_network_code": "mock-network",
+                    "gam_order_id": f"mock-order-{uuid.uuid4().hex[:6]}",
+                    "segments": [],
+                    "status": "active",
+                }
+            else:
+                dsps = sale_data.get("dsps") or []
+                dsp_label = ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name"))
+                activation_record = {
+                    "activation_id": mock_id,
+                    "ssp_name": "magnite",
+                    "dsp_name": dsp_label,
+                    "deal_id": mock_id,
+                    "status": "active",
+                }
+        else:
+            try:
+                act_result = self._activation.create_activation(sale_id)
+                activations = act_result.get("activations") or []
+
+                if not activations:
+                    errors = act_result.get("errors")
+                    logger.warning("Activation returned no results for sale %s, errors: %s", sale_id, errors)
+                    return None
+
+                act_resp = activations[0]
+                activation_id = act_resp.get("activation_id")
+                metadata = act_resp.get("metadata") or {}
+
+                if is_campaign or act_resp.get("ssp_name") == "gam":
+                    activation_record = {
+                        "activation_id": activation_id,
+                        "activation_target": metadata.get("activation_target", "GAM"),
+                        "gam_network_code": metadata.get("gam_network_code", ""),
+                        "gam_order_id": metadata.get("gam_order_id"),
+                        "segments": metadata.get("segments", []),
+                        "status": act_resp.get("status", "active"),
+                    }
+                else:
+                    dsps = sale_data.get("dsps") or []
+                    dsp_label = ", ".join(d.get("dsp_name", "") for d in dsps if d.get("dsp_name"))
+                    activation_record = {
+                        "activation_id": activation_id or f"act-{sale_id}",
+                        "ssp_name": act_resp.get("ssp_name", "magnite"),
+                        "dsp_name": dsp_label,
+                        "deal_id": act_resp.get("deal_id"),
+                        "status": act_resp.get("status", "active"),
+                    }
+                logger.info("Activation created for sale %s: %s", sale_id, activation_id)
+            except AdCPAdapterError:
+                logger.exception("Activation failed for sale %s", sale_id)
+                return None
+
+        try:
+            self._sales.update_sale(
+                sale_id,
+                {"status": "active", "activations": [activation_record]},
+            )
+        except AdCPAdapterError:
+            logger.warning("Failed to update sale %s after activation", sale_id, exc_info=True)
+
+        return activation_id
+
+    # ── Check status ───────────────────────────────────────────────────
+
+    def check_media_buy_status(self, media_buy_id: str, today: datetime) -> CheckMediaBuyStatusResponse:
+        sale = self._sales.get_sale(media_buy_id)
+        raw_status = sale.get("status", "pending_activation")
+        adcp_status = SALE_STATUS_TO_ADCP.get(raw_status, "pending_activation")
+
+        return CheckMediaBuyStatusResponse(
+            media_buy_id=media_buy_id,
+            buyer_ref=sale.get("buyer_ref", ""),
+            status=adcp_status,
+        )
+
+    # ── Get delivery ───────────────────────────────────────────────────
+
+    def get_media_buy_delivery(
+        self,
+        media_buy_id: str,
+        date_range: ReportingPeriod,
+        today: datetime,
+    ) -> AdapterGetMediaBuyDeliveryResponse:
+        # NOTE: real delivery metrics (impressions/spend/clicks) come from the
+        # curation_measurement service which is not yet wired up — see
+        # salesagent-s1i. Until that integration lands we return a zero-valued
+        # response so callers always get a well-formed result. We intentionally
+        # do not call ``self._sales.get_sale`` here because nothing in the
+        # response depends on it — saving an HTTP round trip.
+        return AdapterGetMediaBuyDeliveryResponse(
+            media_buy_id=media_buy_id,
+            reporting_period=date_range,
+            currency="USD",
+            totals=DeliveryTotals(
+                impressions=0.0,
+                spend=0.0,
+                clicks=None,
+                video_completions=None,
+            ),
+            by_package=[],
+        )
+
+    # AdCP statuses that indicate the buy is still active/expected — kept for
+    # delivery reporting even when the adapter has not yet emitted any metrics.
+    _ACTIVE_OR_EXPECTED_STATUSES: frozenset[str] = frozenset(
+        {"pending_activation", "pending_creative", "pending_manual", "scheduled", "active", "paused"}
+    )
+
+    def get_delivery_for_tool(
+        self,
+        req: GetMediaBuyDeliveryRequest,
+        reporting_period: MediaBuyReportingPeriod,
+    ) -> GetMediaBuyDeliveryResponse:
+        """Tool-shaped delivery entry for media_buy_delivery.
+
+        Honours both ``media_buy_ids`` and ``buyer_refs`` filters. When
+        neither is supplied the request is treated as "browse all" and routed
+        through ``list_media_buys`` so callers don't silently get an empty
+        result. Adapter outages become ``adapter_error``; genuine misses
+        keep ``media_buy_not_found``; pending buys retain their status
+        instead of being downgraded to ``not_found``.
+
+        Replaces the inline ``_adapter_managed_delivery`` helper that used to
+        live in ``src/core/tools/media_buy_delivery.py``.
+        """
+        from datetime import UTC, datetime
+
+        from src.core.exceptions import AdCPError, AdCPNotFoundError
+        from src.core.schemas import (
+            AggregatedTotals,
+            DeliveryTotals,
+            Error,
+            GetMediaBuyDeliveryResponse,
+            MediaBuyDeliveryData,
+            PricingModel,
+        )
+        from src.core.schemas.delivery import adcp_to_internal_status
+
+        requested_ids: list[str] = list(req.media_buy_ids or [])
+        buyer_refs: list[str] = list(req.buyer_refs or [])
+
+        if not requested_ids and buyer_refs:
+            try:
+                listed = self.list_media_buys(buyer_refs=buyer_refs)
+                for buy in getattr(listed, "media_buys", []) or []:
+                    mb_id = getattr(buy, "media_buy_id", None)
+                    if mb_id and mb_id not in requested_ids:
+                        requested_ids.append(mb_id)
+            except Exception as exc:
+                logger.warning(
+                    "Adapter list_media_buys failed for buyer_refs=%s: %s",
+                    buyer_refs,
+                    exc,
+                )
+
+        if not requested_ids and not buyer_refs:
+            try:
+                listed = self.list_media_buys()
+                for buy in getattr(listed, "media_buys", []) or []:
+                    mb_id = getattr(buy, "media_buy_id", None)
+                    if mb_id:
+                        requested_ids.append(mb_id)
+            except Exception as exc:
+                logger.warning("Adapter list_media_buys (browse all) failed: %s", exc)
+
+        deliveries: list[MediaBuyDeliveryData] = []
+        ext_errors: list[Error] = []
+        total_spend = 0.0
+        total_impressions = 0
+
+        for mb_id in requested_ids:
+            try:
+                status_resp = self.check_media_buy_status(mb_id, datetime.now(UTC))
+            except AdCPNotFoundError:
+                ext_errors.append(Error(code="media_buy_not_found", message=f"Media buy {mb_id} not found"))
+                continue
+            except AdCPError as exc:
+                logger.error("Adapter status lookup for %s raised %s: %s", mb_id, type(exc).__name__, exc)
+                ext_errors.append(Error(code="adapter_error", message=str(exc)))
+                continue
+            except Exception as exc:
+                logger.error("Unexpected error checking status for %s: %s", mb_id, exc, exc_info=True)
+                ext_errors.append(
+                    Error(code="adapter_error", message=f"Adapter error checking status for {mb_id}: {exc}")
+                )
+                continue
+
+            adapter_status = getattr(status_resp, "status", "active")
+            try:
+                adapter_resp = self.get_media_buy_delivery(mb_id, reporting_period, datetime.now(UTC))
+            except AdCPNotFoundError:
+                ext_errors.append(Error(code="media_buy_not_found", message=f"Media buy {mb_id} not found"))
+                continue
+            except AdCPError as exc:
+                # Pending or otherwise active buys may not have delivery yet — keep the
+                # row instead of failing it, but surface the adapter error for visibility.
+                if adapter_status in self._ACTIVE_OR_EXPECTED_STATUSES:
+                    logger.info(
+                        "Adapter has no delivery yet for %s (status=%s): %s",
+                        mb_id,
+                        adapter_status,
+                        exc,
+                    )
+                    deliveries.append(
+                        MediaBuyDeliveryData(
+                            media_buy_id=mb_id,
+                            buyer_ref=getattr(status_resp, "buyer_ref", None),
+                            status=adcp_to_internal_status(adapter_status),
+                            pricing_model=PricingModel("cpm"),
+                            totals=DeliveryTotals(impressions=0.0, spend=0.0, clicks=None, video_completions=None),
+                            by_package=[],
+                        )
+                    )
+                    continue
+                ext_errors.append(Error(code="adapter_error", message=str(exc)))
+                continue
+            except Exception as exc:
+                logger.error("Unexpected error getting delivery for %s: %s", mb_id, exc, exc_info=True)
+                ext_errors.append(
+                    Error(code="adapter_error", message=f"Adapter error fetching delivery for {mb_id}: {exc}")
+                )
+                continue
+
+            deliveries.append(
+                MediaBuyDeliveryData(
+                    media_buy_id=mb_id,
+                    buyer_ref=getattr(status_resp, "buyer_ref", None),
+                    status=adcp_to_internal_status(adapter_status),
+                    pricing_model=PricingModel("cpm"),
+                    totals=adapter_resp.totals,
+                    by_package=[],
+                )
+            )
+            total_spend += float(adapter_resp.totals.spend or 0)
+            total_impressions += int(adapter_resp.totals.impressions or 0)
+
+        return GetMediaBuyDeliveryResponse(
+            reporting_period={"start": reporting_period.start, "end": reporting_period.end},
+            currency="USD",
+            aggregated_totals=AggregatedTotals(
+                impressions=float(total_impressions),
+                spend=total_spend,
+                clicks=None,
+                video_completions=None,
+                media_buy_count=len(deliveries),
+            ),
+            media_buy_deliveries=deliveries,
+            errors=ext_errors or None,
+            context=req.context,
+        )
+
+    def get_media_buys_for_tool(
+        self,
+        req: GetMediaBuysRequest,
+        include_snapshot: bool,
+    ) -> GetMediaBuysResponse:
+        """Tool-shaped list entry for media_buy_list.
+
+        Translates the AdCP ``status_filter`` to curation sale statuses,
+        delegates to ``self.list_media_buys()``, wraps the result in a
+        ``GetMediaBuysResponse``. Appends a soft ``results_truncated``
+        error entry when the adapter hit its safety cap.
+
+        Replaces the inline ``_get_media_buys_impl_curation`` helper that
+        used to live in ``src/core/tools/media_buy_list.py``.
+        """
+        from pydantic import RootModel
+
+        from src.adapters.curation.status_mapping import ADCP_STATUS_TO_SALE_STATUSES
+        from src.core.schemas import GetMediaBuysResponse, SnapshotUnavailableReason
+
+        # Resolve AdCP status_filter to a set of MediaBuyStatus values.
+        status_filter = req.status_filter
+        if status_filter is None:
+            adcp_statuses: set[MediaBuyStatus] = {MediaBuyStatus.active}
+        elif isinstance(status_filter, RootModel):
+            adcp_statuses = set(status_filter.root)
+        elif isinstance(status_filter, list):
+            adcp_statuses = set(status_filter)
+        else:
+            adcp_statuses = {status_filter}
+
+        sale_statuses: list[str] = []
+        for adcp_status in adcp_statuses:
+            sale_statuses.extend(ADCP_STATUS_TO_SALE_STATUSES.get(adcp_status.value, []))
+
+        result = self.list_media_buys(
+            sale_ids=req.media_buy_ids,
+            buyer_refs=req.buyer_refs,
+            statuses=sale_statuses or None,
+        )
+
+        errors: list[dict] = []
+        if result.truncated:
+            cap = getattr(self, "_max_media_buys_per_list", 500)
+            errors.append(
+                {
+                    "code": "results_truncated",
+                    "message": (
+                        f"Result set exceeded cap of {cap}; "
+                        f"{result.total_fetched} media buys returned. "
+                        f"Narrow filters to see more."
+                    ),
+                }
+            )
+            logger.warning(
+                "Curation get_media_buys truncated at cap=%d (total_fetched=%d)",
+                cap,
+                result.total_fetched,
+            )
+
+        # CurationAdapter does not support realtime reporting; when the caller
+        # requested snapshots, mark every package as unsupported so clients see
+        # the signal instead of silent None.
+        if include_snapshot:
+            for mb in result.media_buys:
+                for pkg in mb.packages:
+                    pkg.snapshot_unavailable_reason = SnapshotUnavailableReason.SNAPSHOT_UNSUPPORTED
+
+        return GetMediaBuysResponse(
+            media_buys=result.media_buys,
+            errors=errors or None,
+            context=req.context,
+        )
+
+    # ── Update media buy ───────────────────────────────────────────────
+
+    def update_media_buy(
+        self,
+        media_buy_id: str,
+        buyer_ref: str,
+        action: str,
+        package_id: str | None,
+        budget: int | None,
+        today: datetime,
+    ) -> UpdateMediaBuyResponse:
+        # The Curation Sales service has no per-segment update endpoint yet — a
+        # ``package_id``-scoped update would silently become a sale-wide update,
+        # which is wrong. Reject the call so the caller sees the limitation
+        # instead of getting unintended behaviour. Tracked alongside
+        # salesagent-rk6 (end-to-end update_media_buy testing).
+        if package_id is not None:
+            raise AdCPValidationError(
+                "Curation adapter does not support package-scoped update_media_buy yet; "
+                "omit package_id to update the whole sale."
+            )
+
+        update_data: dict[str, Any] = {}
+
+        sale_status_change = ACTION_TO_SALE_STATUS.get(action)
+        if sale_status_change is not None:
+            update_data["status"] = sale_status_change
+
+        if budget is not None:
+            update_data["budget"] = float(budget)
+
+        if update_data:
+            self._sales.update_sale(media_buy_id, update_data)
+
+        if action in ACTION_TO_ADCP_STATUS:
+            adcp_status = ACTION_TO_ADCP_STATUS[action]
+        else:
+            # Budget-only or unmapped action — never assume "active". Read the
+            # sale's actual state from the curation service so the response
+            # doesn't misreport paused/completed/failed buys. Falls back to
+            # pending_activation if the GET fails, matching the default shape
+            # elsewhere in this adapter.
+            try:
+                current_sale = self._sales.get_sale(media_buy_id)
+                adcp_status = SALE_STATUS_TO_ADCP.get(current_sale.get("status", ""), "pending_activation")
+            except (AdCPNotFoundError, AdCPAdapterError) as e:
+                logger.warning(
+                    "Could not read current status for sale %s after update: %s",
+                    media_buy_id,
+                    e,
+                )
+                adcp_status = "pending_activation"
+
+        return UpdateMediaBuySuccess(
+            media_buy_id=media_buy_id,
+            buyer_ref=buyer_ref,
+            status=adcp_status,
+        )
+
+    # ── Performance index (no-op for curation) ─────────────────────────
+
+    def update_media_buy_performance_index(
+        self, media_buy_id: str, package_performance: list[PackagePerformance]
+    ) -> bool:
+        return True
+
+    # ── List media buys (sales → AdCP with pagination + cap) ───────────
+
+    def list_media_buys(
+        self,
+        *,
+        sale_ids: list[str] | None = None,
+        buyer_refs: list[str] | None = None,
+        statuses: list[str] | None = None,
+    ) -> ListMediaBuysResult:
+        """Fetch sales from the Sales service and map to AdCP media buys.
+
+        Paginates the sales service up to ``self._max_media_buys_per_list``.
+        Signals truncation via the returned dataclass so callers can surface
+        a soft ``errors[]`` entry to clients.
+
+        Args:
+            sale_ids: Filter to specific sale IDs. When set, the sales
+                service uses batch_get and does not paginate (single call).
+            buyer_refs: Filter to specific buyer references.
+            statuses: Filter to specific curation sale statuses (not AdCP
+                statuses — caller must translate via ADCP_STATUS_TO_SALE_STATUSES).
+
+        Returns:
+            ListMediaBuysResult with the mapped media buys and a truncation flag.
+        """
+        cap = self._max_media_buys_per_list
+        page_size = min(100, cap)  # sales service hard max is 100
+        cursor: str | None = None
+        all_sales: list[dict] = []
+        truncated = False
+
+        while True:
+            remaining = cap - len(all_sales)
+            if remaining <= 0:
+                # We're at or above cap. If there was a cursor from the last
+                # iteration, there's more data we're skipping.
+                truncated = cursor is not None
+                break
+
+            page = self._sales.list_sales(
+                sale_ids=sale_ids,
+                buyer_refs=buyer_refs,
+                statuses=statuses,
+                limit=min(page_size, remaining),
+                cursor=cursor,
+            )
+            items = page.get("items") or []
+            all_sales.extend(items)
+            cursor = page.get("next_cursor")
+
+            if not cursor:
+                # Exhausted
+                break
+            if len(all_sales) >= cap:
+                # Filled the cap and there's more → truncated
+                truncated = True
+                break
+
+        media_buys = [self._sale_to_media_buy(s) for s in all_sales]
+        return ListMediaBuysResult(
+            media_buys=media_buys,
+            truncated=truncated,
+            total_fetched=len(media_buys),
+        )
+
+    # ── Sale → AdCP media buy converter ────────────────────────────────
+
+    def _sale_to_media_buy(self, sale: dict) -> GetMediaBuysMediaBuy:
+        """Convert a curation SaleResponse dict to an AdCP GetMediaBuysMediaBuy.
+
+        Detects sale_type to handle campaign vs deal segment shapes:
+        - Campaign: segments have package_id, product_id, budget, pricing_info
+        - Deal: segments have only segment_id; pricing at sale root level
+        """
+        sale_id = sale["sale_id"]
+        is_campaign = sale.get("sale_type") == "campaign"
+
+        if is_campaign:
+            packages = self._convert_campaign_segments(sale)
+            first_seg = (sale.get("segments") or [{}])[0] if sale.get("segments") else {}
+            currency = (first_seg.get("pricing_info") or {}).get("currency", "USD")
+        else:
+            packages = self._convert_deal_segments(sale)
+            sale_pricing = sale.get("pricing") or {}
+            currency = sale_pricing.get("currency", "USD")
+
+        adcp_status_str = SALE_STATUS_TO_ADCP.get(sale.get("status", ""), "pending_activation")
+
+        return GetMediaBuysMediaBuy(
+            media_buy_id=sale_id,
+            buyer_ref=sale.get("buyer_ref"),
+            buyer_campaign_ref=sale.get("buyer_campaign_ref"),
+            status=MediaBuyStatus(adcp_status_str),
+            currency=currency,
+            total_budget=float(sale.get("budget") or 0.0),
+            packages=packages,
+            created_at=parse_iso(sale.get("created_at")),
+            updated_at=parse_iso(sale.get("updated_at")),
+        )
+
+    def _convert_campaign_segments(self, sale: dict) -> list[GetMediaBuysPackage]:
+        """Convert campaign segments (rich data) to GetMediaBuysPackage list."""
+        packages: list[GetMediaBuysPackage] = []
+        for seg in sale.get("segments") or []:
+            segment_id = seg.get("segment_id") or seg.get("package_id")
+            if not segment_id:
+                continue
+            pricing_info = seg.get("pricing_info") or {}
+            bid_price = pricing_info.get("rate")
+            packages.append(
+                GetMediaBuysPackage(
+                    package_id=seg.get("package_id") or segment_id,
+                    buyer_ref=sale.get("buyer_ref"),
+                    budget=float(seg["budget"]) if seg.get("budget") is not None else None,
+                    bid_price=float(bid_price) if bid_price is not None else None,
+                    product_id=seg.get("product_id") or segment_id,
+                    start_time=sale.get("start_time"),
+                    end_time=sale.get("end_time"),
+                    paused=None,
+                    creative_approvals=None,
+                    snapshot=None,
+                    snapshot_unavailable_reason=None,
+                )
+            )
+        return packages
+
+    def _convert_deal_segments(self, sale: dict) -> list[GetMediaBuysPackage]:
+        """Convert deal segments (simple {segment_id} + root pricing) to GetMediaBuysPackage list."""
+        sale_pricing = sale.get("pricing") or {}
+        packages: list[GetMediaBuysPackage] = []
+        for seg in sale.get("segments") or []:
+            segment_id = seg.get("segment_id")
+            if not segment_id:
+                continue
+            seg_pricing = seg.get("pricing") or sale_pricing
+            bid_price = seg_pricing.get("fixed_price") or seg_pricing.get("floor_price")
+            packages.append(
+                GetMediaBuysPackage(
+                    package_id=segment_id,
+                    buyer_ref=sale.get("buyer_ref"),
+                    budget=None,
+                    bid_price=float(bid_price) if bid_price is not None else None,
+                    product_id=segment_id,
+                    start_time=sale.get("start_time"),
+                    end_time=sale.get("end_time"),
+                    paused=None,
+                    creative_approvals=None,
+                    snapshot=None,
+                    snapshot_unavailable_reason=None,
+                )
+            )
+        return packages

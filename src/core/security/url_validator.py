@@ -2,9 +2,30 @@
 
 Single source of truth for blocked networks and hostnames used by both
 property list resolution and webhook URL validation.
+
+Operator allowlist
+------------------
+Two env vars carve narrow exceptions to the private-IP block without
+weakening the blocked-hostname / scheme checks:
+
+``SSRF_ALLOWED_HOSTS``
+    Comma-separated exact hostnames (case-insensitive). Whitespace-only
+    entries are ignored.
+
+``SSRF_ALLOWED_HOST_SUFFIXES``
+    Comma-separated DNS suffixes (case-insensitive). Include the leading
+    dot to avoid sibling-domain escapes — ``.seller.local`` matches
+    ``a.seller.local`` but not ``evilseller.local``.
+
+Both default to empty. A host on the allowlist skips the
+BLOCKED_NETWORKS / non-routable-IP check but still goes through scheme
+validation and the BLOCKED_HOSTNAMES literal check — cloud-metadata IPs
+like ``169.254.169.254`` and literal ``localhost`` cannot be allowlisted
+this way.
 """
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -33,6 +54,31 @@ BLOCKED_HOSTNAMES = {
     "gateway.docker.internal",
     "docker.host.internal",
 }
+
+# Env vars for the operator allowlist (see module docstring).
+_ENV_ALLOWED_HOSTS = "SSRF_ALLOWED_HOSTS"
+_ENV_ALLOWED_HOST_SUFFIXES = "SSRF_ALLOWED_HOST_SUFFIXES"
+
+
+def _load_allowlist(env_var: str) -> tuple[str, ...]:
+    """Return lowercased, whitespace-stripped, non-empty entries from an env var."""
+    raw = os.getenv(env_var, "")
+    return tuple(entry.strip().lower() for entry in raw.split(",") if entry.strip())
+
+
+def _hostname_is_allowlisted(hostname: str) -> bool:
+    """True when ``hostname`` matches SSRF_ALLOWED_HOSTS / _HOST_SUFFIXES.
+
+    Env vars are read on every call so operators can adjust the allowlist
+    without restarting. SSRF validation is not a hot path.
+    """
+    host = hostname.lower()
+    if host in _load_allowlist(_ENV_ALLOWED_HOSTS):
+        return True
+    for suffix in _load_allowlist(_ENV_ALLOWED_HOST_SUFFIXES):
+        if host.endswith(suffix):
+            return True
+    return False
 
 
 def check_url_ssrf(url: str, *, require_https: bool = False) -> tuple[bool, str]:
@@ -66,20 +112,41 @@ def check_url_ssrf(url: str, *, require_https: bool = False) -> tuple[bool, str]
         if hostname.lower() in BLOCKED_HOSTNAMES:
             return False, f"URL hostname '{hostname}' is blocked (internal/private)"
 
+        # Operator allowlist: hosts explicitly whitelisted via env var skip
+        # the private-network IP check. The BLOCKED_HOSTNAMES check above
+        # still wins, so literal metadata addresses and 'localhost' cannot
+        # be allowlisted through here.
+        if _hostname_is_allowlisted(hostname):
+            return True, ""
+
+        # Resolve EVERY address family the hostname returns (IPv4 + IPv6).
+        # `gethostbyname` returns only a single IPv4 address, which would let
+        # a hostname with a public IPv4 and a private IPv6 bypass the check.
         try:
-            ip_str = socket.gethostbyname(hostname)
-            ip = ipaddress.ip_address(ip_str)
+            infos = socket.getaddrinfo(hostname, None)
         except socket.gaierror:
             return False, f"Cannot resolve hostname: {hostname}"
-        except ValueError as e:
-            return False, f"Invalid IP address from hostname resolution: {e}"
 
-        for network in BLOCKED_NETWORKS:
-            if ip in network:
-                return False, f"URL resolves to blocked IP range {network} (private/internal network)"
+        for info in infos:
+            addr = info[4][0]
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
 
-        if ip.is_loopback or ip.is_link_local or ip.is_private:
-            return False, f"URL resolves to private/internal IP address: {ip}"
+            for network in BLOCKED_NETWORKS:
+                if ip in network:
+                    return False, f"URL resolves to blocked IP range {network} (private/internal network)"
+
+            if (
+                ip.is_loopback
+                or ip.is_link_local
+                or ip.is_private
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                return False, f"URL resolves to non-routable IP address: {ip}"
 
         return True, ""
 
