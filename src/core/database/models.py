@@ -69,6 +69,10 @@ class Tenant(Base, JSONValidatorMixin):
     auto_approve_format_ids: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     human_review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     policy_settings: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    supported_billing: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)  # BR-RULE-059
+    account_approval_mode: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )  # BR-RULE-060: auto|credit_review|legal_review
     signals_agent_config: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     creative_review_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
     _gemini_api_key: Mapped[str | None] = mapped_column("gemini_api_key", String(500), nullable=True)
@@ -170,9 +174,10 @@ class Tenant(Base, JSONValidatorMixin):
 
         try:
             return decrypt_api_key(self._gemini_api_key)
-        except ValueError:
-            logger.warning(f"Failed to decrypt Gemini API key for tenant {self.tenant_id}")
-            return None
+        except ValueError as exc:
+            from src.core.exceptions import AdCPConfigurationError
+
+            raise AdCPConfigurationError(f"Failed to decrypt Gemini API key for tenant {self.tenant_id}") from exc
 
     @gemini_api_key.setter
     def gemini_api_key(self, value: str | None) -> None:
@@ -368,60 +373,14 @@ class Product(Base, JSONValidatorMixin):
         If no properties/property_ids/property_tags are set, defaults to "all" variant
         (all properties from this publisher).
         """
+        from src.core.helpers.publisher_property_helpers import ensure_selection_type
+
         if self.inventory_profile_id and self.inventory_profile:
-            return self.inventory_profile.publisher_properties
+            return ensure_selection_type(self.inventory_profile.publisher_properties)
 
         # Convert product's authorization to AdCP publisher_properties format
         if self.properties:
-            # Legacy: Full Property objects - convert to discriminated union format
-            # AdCP 2.13.0+ requires selection_type discriminator
-            import re
-
-            property_id_pattern = re.compile(r"^[a-z0-9_]+$")
-            property_tag_pattern = re.compile(r"^[a-z0-9_]+$")
-
-            converted = []
-            for prop in self.properties:
-                if isinstance(prop, dict):
-                    # Check if already has selection_type (already converted)
-                    if "selection_type" in prop:
-                        converted.append(prop)
-                    else:
-                        # Convert legacy format to new discriminated union format
-                        publisher_domain = prop.get("publisher_domain", "unknown")
-                        prop_ids = prop.get("property_ids", [])
-                        prop_tags = prop.get("property_tags", [])
-
-                        # Filter to only valid property IDs (must match ^[a-z0-9_]+$)
-                        valid_ids = [pid for pid in prop_ids if property_id_pattern.match(str(pid))]
-                        # Filter to only valid property tags (must match ^[a-z0-9_]+$)
-                        valid_tags = [tag for tag in prop_tags if property_tag_pattern.match(str(tag))]
-
-                        if valid_ids:
-                            # Convert to by_id variant
-                            converted.append(
-                                {
-                                    "publisher_domain": publisher_domain,
-                                    "property_ids": valid_ids,
-                                    "selection_type": "by_id",
-                                }
-                            )
-                        elif valid_tags:
-                            # Convert to by_tag variant
-                            converted.append(
-                                {
-                                    "publisher_domain": publisher_domain,
-                                    "property_tags": valid_tags,
-                                    "selection_type": "by_tag",
-                                }
-                            )
-                        else:
-                            # Convert to all variant (default - when legacy IDs/tags are invalid)
-                            converted.append({"publisher_domain": publisher_domain, "selection_type": "all"})
-                else:
-                    # Unknown format, skip
-                    pass
-            return converted if converted else None
+            return ensure_selection_type(self.properties)
         elif self.property_ids:
             # AdCP 2.0.0 by_id variant
             # Get publisher_domain from tenant (use subdomain or virtual_host)
@@ -680,7 +639,12 @@ class TenantAuthConfig(Base):
             return None
         from src.core.utils.encryption import decrypt_api_key
 
-        return decrypt_api_key(self.oidc_client_secret_encrypted)
+        try:
+            return decrypt_api_key(self.oidc_client_secret_encrypted)
+        except ValueError as exc:
+            from src.core.exceptions import AdCPConfigurationError
+
+            raise AdCPConfigurationError(f"Failed to decrypt OIDC client secret for tenant {self.tenant_id}") from exc
 
     @oidc_client_secret.setter
     def oidc_client_secret(self, value: str | None) -> None:
@@ -1229,9 +1193,12 @@ class AdapterConfig(Base):
 
         try:
             return decrypt_api_key(self._gam_service_account_json)
-        except ValueError:
-            logger.warning(f"Failed to decrypt GAM service account JSON for tenant {self.tenant_id}")
-            return None
+        except ValueError as exc:
+            from src.core.exceptions import AdCPConfigurationError
+
+            raise AdCPConfigurationError(
+                f"Failed to decrypt GAM service account JSON for tenant {self.tenant_id}"
+            ) from exc
 
     @gam_service_account_json.setter
     def gam_service_account_json(self, value: str | None) -> None:
