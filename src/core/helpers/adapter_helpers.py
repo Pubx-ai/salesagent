@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from adcp import AgentConfig
+
+logger = logging.getLogger(__name__)
 
 
 class _HasAgentFields(Protocol):
@@ -271,12 +274,18 @@ def adapter_manages_own_persistence(tenant: dict[str, Any]) -> bool:
     whether the field is stored as a string or a dict.
     """
     adapter_type = _coerce_adapter_type(tenant.get("ad_server"))
+    # Import at call time to avoid a circular import with src.adapters.
+    # A missing registry or adapter class is a legitimate fallback path:
+    # unknown adapter types default to Postgres-backed persistence (False).
+    # Narrow the catch to the specific ways this can fail rather than
+    # swallowing all exceptions (pre-commit guard: no_silent_except).
     try:
         from src.adapters import ADAPTER_REGISTRY
+    except ImportError as exc:
+        logger.debug("ADAPTER_REGISTRY unavailable: %s", exc)
+        return False
 
-        adapter_class = ADAPTER_REGISTRY.get(adapter_type)
-        if adapter_class is not None:
-            return bool(getattr(adapter_class, "manages_own_persistence", False))
-    except Exception:
-        pass
-    return False
+    adapter_class = ADAPTER_REGISTRY.get(adapter_type)
+    if adapter_class is None:
+        return False
+    return bool(getattr(adapter_class, "manages_own_persistence", False))

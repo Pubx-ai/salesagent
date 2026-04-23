@@ -338,47 +338,33 @@ class TestFilterBranches:
         assert len(result.products) == 1
 
     @pytest.mark.asyncio
-    async def test_format_types_filter_with_format_id_objects(self):
-        """Cover format_types filter FormatId branch (L546-563).
+    async def test_format_types_filter_is_currently_a_noop(self):
+        """format_types filter is intentionally disabled on the pubx curation fork.
 
-        Product.format_ids are FormatId objects. The filter dispatches through
-        isinstance(format_id, FormatId) and looks up the format type via
-        get_format_by_id. The format type is added to product_format_types as
-        a string, but req.filters.format_types contains FormatCategory enum
-        values. Since FormatCategory is not a str enum, the comparison always
-        fails. This documents the current behavior.
+        See ``# TODO(pubx)`` in src/core/tools/products.py — the filter is
+        commented out pending reliable population of inventory_formats for
+        curation segments. Until it's re-enabled, products with any format
+        should pass through regardless of req.filters.format_types.
+
+        When the filter comes back, this test should be replaced with two:
+        one asserting FormatId-object products are included/excluded correctly,
+        and one asserting wrong-type products are excluded.
         """
-        format_obj = MagicMock()
-        format_obj.type = "display"
-
-        product = create_test_product(product_id="prod1", format_ids=["display_300x250"])
-
-        result = await self._run_with_products_and_filters(
-            [product],
-            {"format_types": ["display"]},
-            extra_patches=[
-                patch("src.core.schemas.get_format_by_id", return_value=format_obj),
-            ],
-        )
-        # FormatCategory.display != "display" (enum is not str mixin), so filter excludes all
-        assert len(result.products) == 0
-
-    @pytest.mark.asyncio
-    async def test_format_types_filter_excludes_wrong_type(self):
-        """format_types filter excludes products whose formats don't match."""
         format_obj = MagicMock()
         format_obj.type = "video"
 
-        product = create_test_product(product_id="prod1", format_ids=["video_preroll"])
+        product_display = create_test_product(product_id="p_display", format_ids=["display_300x250"])
+        product_video = create_test_product(product_id="p_video", format_ids=["video_preroll"])
 
         result = await self._run_with_products_and_filters(
-            [product],
+            [product_display, product_video],
             {"format_types": ["display"]},
             extra_patches=[
                 patch("src.core.schemas.get_format_by_id", return_value=format_obj),
             ],
         )
-        assert len(result.products) == 0
+        # Filter disabled → both products pass through (no format_types filtering).
+        assert len(result.products) == 2
 
     @pytest.mark.asyncio
     async def test_format_ids_filter_matches_format_id_objects(self):

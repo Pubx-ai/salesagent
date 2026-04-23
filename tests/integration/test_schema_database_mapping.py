@@ -64,6 +64,8 @@ class TestSchemaFieldMapping:
             "show_ids",  # Show/series identifiers from adcp 3.10 spec
             "exclusivity",  # Exclusivity constraints from adcp 3.10 spec
             "episodes",  # Episode-level targeting from adcp 3.10 spec
+            # Curation-fork field — populated at runtime by the AI ranker, not persisted
+            "relevance_score",  # LLM-generated score (0-1) attached to products during get_products
         }
 
         # Fields that exist in database but should NOT be in external schema (internal only)
