@@ -8,7 +8,7 @@ on:
       - 'v*'
 
 env:
-  SERVICE_NAME: prebid-sales-agent
+  SERVICE_NAME: prebid-salesagent
   AWS_REGION: us-east-1
 
 jobs:
