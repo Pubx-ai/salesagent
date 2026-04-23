@@ -18,6 +18,7 @@ from starlette.routing import BaseRoute, Route
 from src.core.main import mcp
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # ---------------------------------------------------------------------------
 # MCP sub-application
