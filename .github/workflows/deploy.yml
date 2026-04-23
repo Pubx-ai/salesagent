@@ -6,6 +6,17 @@ on:
       - develop
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
 
 env:
   SERVICE_NAME: prebid-salesagent
@@ -33,7 +44,9 @@ jobs:
       - name: Determine environment
         id: env
         run: |
-          if [[ "${{ github.ref }}" == refs/heads/develop ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/develop ]]; then
             echo "environment=staging" >> $GITHUB_OUTPUT
           elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "environment=prod" >> $GITHUB_OUTPUT
