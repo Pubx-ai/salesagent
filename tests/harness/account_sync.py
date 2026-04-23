@@ -68,15 +68,54 @@ class AccountSyncEnv(IntegrationEnv):
         mock_logger = MagicMock()
         self.mock["audit_logger"].return_value = mock_logger
 
+    def set_billing_policy(self, supported: list[str]) -> None:
+        """Configure which billing models this seller accepts (BR-RULE-059).
+
+        Updates both the in-memory tenant overrides (for mock identity path)
+        and the DB tenant record (for real MCP/A2A auth chain).
+        """
+        self._supported_billing = supported
+        self._tenant_overrides["supported_billing"] = supported
+        self._identity_cache.clear()
+
+        if self._session:
+            from src.core.database.models import Tenant
+
+            tenant = self._session.get(Tenant, self._tenant_id)
+            if tenant:
+                tenant.supported_billing = supported
+                self._session.commit()
+
+    def set_approval_mode(self, mode: str) -> None:
+        """Configure account approval mode (BR-RULE-060).
+
+        Updates both the in-memory tenant overrides (for mock identity path)
+        and the DB tenant record (for real MCP/A2A auth chain).
+        """
+        self._account_approval_mode = mode
+        self._tenant_overrides["account_approval_mode"] = mode
+        self._identity_cache.clear()
+
+        if self._session:
+            from src.core.database.models import Tenant
+
+            tenant = self._session.get(Tenant, self._tenant_id)
+            if tenant:
+                # BR-RULE-060: account approval mode is a distinct field from creative
+                # approval_mode (BR-RULE-037). Write to the correct column so the MCP
+                # real-auth chain (which reads DB via config_loader.get_tenant_by_id)
+                # sees the test-configured value.
+                tenant.account_approval_mode = mode
+                self._session.commit()
+
     def identity_for(self, transport: Any) -> Any:
-        """Build identity with optional billing policy and approval mode."""
-        ident = super().identity_for(transport)
-        updates: dict[str, Any] = {}
+        """Build identity with billing policy and approval mode on the tenant dict."""
         if self._supported_billing is not None:
-            updates["supported_billing"] = self._supported_billing
+            self._tenant_overrides["supported_billing"] = self._supported_billing
         if self._account_approval_mode is not None:
-            updates["account_approval_mode"] = self._account_approval_mode
-        return ident.model_copy(update=updates) if updates else ident
+            self._tenant_overrides["account_approval_mode"] = self._account_approval_mode
+        self._identity_cache.clear()
+        return super().identity_for(transport)
 
     async def call_impl_async(self, **kwargs: Any) -> SyncAccountsResponse:
         """Call _sync_accounts_impl with real DB (async version).
@@ -96,23 +135,13 @@ class AccountSyncEnv(IntegrationEnv):
         """
         return asyncio.run(self.call_impl_async(**kwargs))
 
-    async def call_a2a_async(self, **kwargs: Any) -> SyncAccountsResponse:
-        """Call sync_accounts_raw (A2A wrapper) with real DB (async version)."""
-        from src.core.tools.accounts import sync_accounts_raw
-
-        self._commit_factory_data()
-        kwargs.setdefault("identity", self.identity)
-        return await sync_accounts_raw(**kwargs)
-
     def call_a2a(self, **kwargs: Any) -> SyncAccountsResponse:
-        """Call sync_accounts_raw (A2A wrapper) with real DB (sync wrapper)."""
-        return asyncio.run(self.call_a2a_async(**kwargs))
+        """Call sync_accounts via real AdCPRequestHandler — full A2A pipeline."""
+        return self._run_a2a_handler("sync_accounts", SyncAccountsResponse, **kwargs)
 
     def call_mcp(self, **kwargs: Any) -> SyncAccountsResponse:
-        """Call sync_accounts MCP wrapper with mock Context."""
-        from src.core.tools.accounts import sync_accounts
-
-        return self._run_mcp_wrapper(sync_accounts, SyncAccountsResponse, **kwargs)
+        """Call sync_accounts via Client(mcp) — full pipeline dispatch."""
+        return self._run_mcp_client("sync_accounts", SyncAccountsResponse, **kwargs)
 
     REST_ENDPOINT = "/api/v1/accounts/sync"
 

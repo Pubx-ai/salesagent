@@ -1,5 +1,6 @@
 """Unit tests for property list resolver with caching."""
 
+import socket
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,6 +9,11 @@ import pytest
 from adcp.types import PropertyListReference
 
 from src.core.exceptions import AdCPAdapterError
+
+
+def _addrinfo(ip: str) -> list:
+    """Build a getaddrinfo() return value for the given IPv4 string."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))]
 
 
 @pytest.fixture(autouse=True)
@@ -24,12 +30,15 @@ def _clear_cache():
 def _stub_dns():
     """Stub DNS resolution so tests don't make real DNS lookups.
 
-    Returns a public IP for all hostnames by default. Tests in
-    TestSSRFProtection override this where needed.
+    The SSRF validator uses ``socket.getaddrinfo`` (not ``gethostbyname``)
+    to enumerate all address families; the stub must match. Returns a
+    single public IPv4 for all hostnames by default. Tests in
+    TestSSRFProtection override this where they need to simulate
+    DNS-rebinding to private IPs.
     """
     with patch(
-        "src.core.security.url_validator.socket.gethostbyname",
-        return_value="93.184.216.34",
+        "src.core.security.url_validator.socket.getaddrinfo",
+        return_value=_addrinfo("93.184.216.34"),
     ):
         yield
 
@@ -446,10 +455,13 @@ class TestSSRFProtection:
         ref = _make_ref(agent_url=malicious_url)
 
         with patch(
-            "src.core.security.url_validator.socket.gethostbyname",
-            return_value=resolved_ip,
+            "src.core.security.url_validator.socket.getaddrinfo",
+            return_value=_addrinfo(resolved_ip),
         ):
-            with pytest.raises(AdCPAdapterError, match="[Bb]locked|[Pp]rivate|[Ii]nternal"):
+            with pytest.raises(
+                AdCPAdapterError,
+                match="[Bb]locked|[Pp]rivate|[Ii]nternal|non-routable",
+            ):
                 await resolve_property_list(ref)
 
     @pytest.mark.asyncio

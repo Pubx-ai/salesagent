@@ -44,6 +44,8 @@ pytest_plugins = [
     "tests.bdd.steps.domain.uc006_sync_creatives",
     "tests.bdd.steps.domain.uc011_accounts",
     "tests.bdd.steps.domain.admin_accounts",
+    "tests.bdd.steps.domain.uc_get_products_inventory",
+    "tests.bdd.steps.domain.compat_normalization",
 ]
 
 # ---------------------------------------------------------------------------
@@ -252,6 +254,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
                     break
 
         # UC-011 REST: per-request auth implemented (salesagent-xms)
+        # UC-011 MCP: billing policy and approval mode now populated from DB via
+        # account_approval_mode column + proper harness writes (#1184 complete).
 
         # FIXME(salesagent-9d5): UC-006 REST — account resolution through CreativeSyncEnv
         # REST route for sync_creatives exists but account kwarg may not be
@@ -584,6 +588,10 @@ def _detect_uc(request: pytest.FixtureRequest) -> str | None:
         return "UC-011"
     if any(t.startswith(_ADMIN_TAG_PREFIX) for t in marker_names):
         return "ADMIN"
+    if "inventory_profile" in marker_names:
+        return "UC-GET-PRODUCTS"
+    if any(t.startswith("T-COMPAT") for t in marker_names):
+        return "COMPAT"
     return None
 
 
@@ -695,6 +703,14 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             ctx["env"] = env
             yield
 
+    elif uc == "COMPAT":
+        request.getfixturevalue("integration_db")
+        from tests.harness.product import ProductEnv
+
+        with ProductEnv() as env:
+            ctx["env"] = env
+            yield
+
     elif uc == "UC-004":
         harness_type = _detect_delivery_harness(request)
 
@@ -726,5 +742,12 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 yield
         else:
             pytest.xfail(f"UC-004 harness not yet wired for type: {harness_type}")
+    elif uc == "UC-GET-PRODUCTS":
+        request.getfixturevalue("integration_db")
+        from tests.harness.product import ProductEnv
+
+        with ProductEnv() as env:
+            ctx["env"] = env
+            yield
     else:
         pytest.xfail(f"No harness wired for {uc}")
