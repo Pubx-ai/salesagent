@@ -82,7 +82,7 @@ a2a_app.add_routes_to_app(
 
 @app.api_route("/a2a/", methods=["GET", "POST", "OPTIONS"])
 async def a2a_trailing_slash_redirect(request: Request):
-    url = request.url.replace(path="/a2a/")
+    url = request.url.replace(path="/a2a")
     return RedirectResponse(url=str(url), status_code=307)
 
 
