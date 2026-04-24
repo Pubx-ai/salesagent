@@ -39,7 +39,7 @@ def run_migrations() -> None:
         timeout=120,
     )
     if result.returncode != 0:
-        logger.error("Migration failed:\n%s", result.stderr)
+        logger.error("Migration failed:\nstdout: %s\nstderr: %s", result.stdout, result.stderr)
         sys.exit(1)
     logger.info("Migrations complete")
 
