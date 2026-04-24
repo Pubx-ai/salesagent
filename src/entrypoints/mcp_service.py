@@ -168,7 +168,7 @@ async def a2a_messageid_compatibility_middleware(request: Request, call_next):
             if "id" in data and isinstance(data["id"], (int, float)):
                 data["id"] = str(data["id"])
                 body = json.dumps(data).encode()
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
         from starlette.requests import Request as StarletteRequest
