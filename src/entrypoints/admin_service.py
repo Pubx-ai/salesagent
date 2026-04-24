@@ -25,7 +25,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # ---------------------------------------------------------------------------
 # Migrations — run once before uvicorn starts.
-# Alembic advisory locks make concurrent runs from multiple tasks safe.
+# migrate.py handles the alembic_version table race condition with a retry
+# in case two tasks start concurrently during a rolling deploy.
 # ---------------------------------------------------------------------------
 
 
@@ -143,8 +144,10 @@ app.router.routes.insert(1, Route("/landing", _handle_landing_page, methods=["GE
 # ---------------------------------------------------------------------------
 
 from src.core.auth_middleware import UnifiedAuthMiddleware  # noqa: E402
+from src.routes.rest_compat_middleware import RestCompatMiddleware  # noqa: E402
 
 app.add_middleware(UnifiedAuthMiddleware)
+app.add_middleware(RestCompatMiddleware)
 
 _cors_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8000").split(",")
 app.add_middleware(
