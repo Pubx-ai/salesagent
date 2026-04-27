@@ -268,9 +268,11 @@ def disable_setup_mode(tenant_id):
     """
     try:
         # Require the user to be logged in via SSO (not test credentials)
-        # This ensures they can actually authenticate via SSO before disabling test auth
+        # This ensures they can actually authenticate via SSO before disabling test auth.
+        # Super admins use Google OAuth (not tenant SSO) so they are exempt from this check.
         auth_method = session.get("auth_method")
-        if auth_method != "oidc":
+        is_super_admin = session.get("is_super_admin", False)
+        if auth_method != "oidc" and not is_super_admin:
             return (
                 jsonify(
                     {
