@@ -27,6 +27,8 @@ You are an expert Python developer specializing in ad-tech, MCP (Model Context P
 
 The Prebid Sales Agent is a reference implementation of the [Ad Context Protocol (AdCP)](https://adcontextprotocol.org), enabling AI agents to buy advertising inventory through standardized MCP and A2A interfaces. It is maintained under Prebid.org.
 
+**This repo is a fork.** The upstream is [prebid/salesagent](https://github.com/prebid/salesagent); this fork lives at [Pubx-ai/salesagent](https://github.com/Pubx-ai/salesagent) and adds curation functionality on top of the upstream AdCP reference implementation. We rebase against `upstream/main` frequently — see "Fork Architecture & Upstream Sync" below.
+
 ### Tech Stack
 
 - **Language**: Python 3.12+
@@ -59,6 +61,67 @@ The Prebid Sales Agent is a reference implementation of the [Ad Context Protocol
 | `pydantic` | Schema validation |
 | `factory-boy` | Test data factories |
 | `pytest-bdd` | BDD behavioral tests |
+
+---
+
+## Fork Architecture & Upstream Sync
+
+This is a Pubx-ai fork of prebid/salesagent. We carry custom **curation** functionality (`src/adapters/curation/` plus thin integration points) and rebase against upstream often. Because every line of upstream code we modify is a future merge conflict, the rules below are non-negotiable.
+
+### Remotes
+
+| Remote | URL | Use |
+|--------|-----|-----|
+| `origin` | `git@github.com:Pubx-ai/salesagent.git` | This fork — push/pull here |
+| `upstream` | `https://github.com/prebid/salesagent.git` | Canonical AdCP reference — fetch only, never push |
+
+### Two Non-Negotiable Principles
+
+**Principle 1 — All changes must be sync-friendly.** Make changes that minimize merge conflicts when rebasing against `upstream/main`. Prefer adding new files, modules, blueprints, and registry entries over modifying upstream code. When you must modify an upstream file, change as few lines as possible and use the established extension hooks (registry lookups, plugin classes, `ext` dicts, ABC overrides). Never string-match adapter names or hardcode curation logic into upstream tool flow. Never reformat upstream files.
+
+**Principle 2 — Curation changes are strictly additive.** New curation features should plug into upstream extension points (the `AdServerAdapter` ABC, `ADAPTER_REGISTRY`, `adapter_manages_own_persistence()`, `_for_tool()` dispatch) without modifying core upstream tool implementations, schemas, or adapter base classes. **Do NOT drastically restructure upstream files for curation purposes without explicit user confirmation.** If a curation feature appears to require deep upstream changes, STOP and present alternatives to the user first: (a) smallest additive workaround, (b) restructure with diff size estimate, (c) propose-upstream. Wait for explicit confirmation before writing code that significantly modifies upstream files.
+
+### What Counts as "Curation-Only" vs. "Upstream-Shared"
+
+**Curation-only (we own these — modify freely):**
+- `src/adapters/curation/` — adapter package
+- `src/admin/blueprints/curation.py` — admin UI for curation config
+- `tests/{unit,integration}/test_curation*.py`, `tests/helpers/curation_fixtures.py`
+- `alembic/versions/*curation*.py`
+- `docs/curation-*.md`
+- `src/entrypoints/` — Pubx ECS entrypoints
+
+**Upstream-shared (modify cautiously — every change is a future merge conflict):**
+- `src/adapters/__init__.py`, `src/adapters/base.py`
+- `src/core/main.py`, `src/core/helpers/adapter_helpers.py`
+- `src/core/tools/{products,media_buy_create,media_buy_list,media_buy_delivery}.py`
+- `src/core/tools/creatives/_sync.py`
+- `src/core/schemas/product.py`
+- `src/admin/blueprints/adapters.py`, `src/admin/app.py`
+
+### Marking Custom Modifications
+
+When modifying an upstream file is unavoidable, leave a `# PUBX:` marker comment so future rebasers can grep for every fork-specific edit:
+
+```python
+# PUBX: dispatch to adapter when it manages its own persistence
+if adapter_manages_own_persistence(tenant):
+    return await _delegate_to_adapter(...)
+```
+
+`git grep "# PUBX:"` then reveals every modification site in the fork. Add markers opportunistically — older modification sites won't have them yet.
+
+### See the Full Rule
+
+`.claude/rules/workflows/upstream-sync-and-fork-changes.md` contains:
+- Detailed sync-friendly change patterns (curation tools, config, hooks, DB tables, admin UI)
+- The full upstream sync workflow (pre-sync checks → branch → resolve → verify → PR)
+- Conflict watch list (highest-risk files on rebase)
+- Anti-patterns to avoid
+- Decision tree for "additive vs. modify upstream"
+- Pre-PR sync-friendliness checklist
+
+Read it before making any change that touches upstream-shared files, and before every upstream sync.
 
 ---
 
@@ -657,6 +720,9 @@ scripts/run-test.sh tests/integration/test_foo.py -x -v
 ### Always Do
 
 - Run `make quality` before every commit
+- **Prefer additive changes (new files) over modifying upstream-shared files** — see Fork Architecture section
+- **Mark unavoidable upstream-file modifications with `# PUBX:` comments** so they're greppable on rebase
+- **Use the registry pattern for adapter dispatch** (`adapter_manages_own_persistence(tenant)`, `_for_tool()`) — never string-match adapter names in upstream tool code
 - Use factory-boy factories for all test data
 - Extend `adcp` library types via inheritance (never duplicate)
 - Use `ResolvedIdentity` in `_impl` functions (never `Context`)
@@ -670,6 +736,9 @@ scripts/run-test.sh tests/integration/test_foo.py -x -v
 ### Ask First
 
 - Adding new dependencies (use `uv` to add)
+- **Drastically restructuring any upstream-shared file for curation purposes** — present alternatives (additive workaround / restructure with diff size estimate / propose-upstream) before writing code (Fork Principle 2)
+- **Adding columns to existing upstream ORM tables** (`tenants`, `principals`, `media_buys`, `products`, `creatives`) — prefer new tables or `config_json`/`ext` fields
+- **Modifying `_impl` function signatures** in `src/core/tools/*.py` — likely indicates the change should live in `CurationAdapter._for_tool()` instead
 - Modifying `src/core/schemas/_base.py` or `src/core/database/models.py`
 - Creating new Alembic migrations
 - Changing adapter interfaces (`src/adapters/base.py`)
@@ -679,6 +748,11 @@ scripts/run-test.sh tests/integration/test_foo.py -x -v
 ### Never Do
 
 - Push directly to `main` (use feature branches + PRs)
+- Push to `upstream` remote (it's prebid/salesagent — fetch only)
+- **String-match adapter names** (e.g. `if adapter_type == "curation"`) inside upstream tool flow — use the registry pattern instead
+- **Reformat or reflow upstream-shared files** — whitespace-only changes guarantee merge conflicts for zero benefit
+- **Add curation imports to `src/app.py`/`src/core/main.py` "for convenience"** — let the lazy import in `get_adapter()` do its job
+- **"Drive-by" upstream cleanup** ("while I'm here, let me also fix...") — file a separate beads issue and stay narrowly scoped
 - Commit secrets, API keys, or credentials
 - Skip, ignore, or deselect failing tests
 - Use `session.query()` (use `select()` + `scalars()`)
@@ -705,6 +779,19 @@ scripts/run-test.sh tests/integration/test_foo.py -x -v
 - `.pre-commit-config.yaml` — hook configuration
 - `docker-compose.yml` — development environment
 - `.duplication-baseline` — DRY enforcement threshold
+
+**Upstream-conflict watch list** (highest-risk files on rebase — minimize edits and mark with `# PUBX:`):
+
+- `src/core/main.py` — `AVAILABLE_ADAPTERS` and tool registration grow upstream
+- `src/core/helpers/adapter_helpers.py` — `get_adapter()` factory and `adapter_manages_own_persistence()` registry
+- `src/core/tools/products.py` — heavy upstream activity
+- `src/core/tools/media_buy_create.py` — heavy upstream activity
+- `src/core/tools/media_buy_list.py` — heavy upstream activity
+- `src/core/tools/media_buy_delivery.py` — heavy upstream activity
+- `src/core/tools/creatives/_sync.py` — curation skip block lives here
+- `src/core/schemas/product.py` — schema evolves with each AdCP version
+- `src/admin/blueprints/adapters.py`, `src/admin/app.py` — admin routing
+- `src/adapters/__init__.py`, `src/adapters/base.py` — adapter registry/ABC
 
 ---
 
@@ -817,6 +904,27 @@ uvx adcp http://localhost:8000/mcp/ --auth test-token list_tools
 3. Run `make quality` after each change
 4. Verify imports: `uv run python -c "from module import thing"`
 5. For shared implementations: `tox -e integration`
+6. **If touching upstream-shared files**: review `.claude/rules/workflows/upstream-sync-and-fork-changes.md` first — large refactors of upstream code need explicit user confirmation
+
+### Adding a Curation Feature
+
+1. Default: feature lives entirely under `src/adapters/curation/` (extend `CurationAdapter`, add to `_for_tool()` dispatch)
+2. Admin UI: new file under `src/admin/blueprints/curation.py` (or sibling), registered with one line in `src/admin/app.py`
+3. Config: extend `CurationConnectionConfig` (in `src/adapters/curation/config.py`) — do NOT add columns to upstream `Tenant`/`AdapterConfig` tables
+4. DB tables: new tables in fresh migrations — do NOT add columns to upstream tables
+5. **If the feature requires modifying upstream-shared files significantly**: STOP — present alternatives to the user (additive workaround / restructure-with-diff-estimate / propose-upstream) and wait for confirmation
+6. Run curation-specific tests: `tox -e unit -- tests/unit/test_curation*.py tests/integration/test_curation*.py`
+7. Run `make quality`
+
+### Syncing with Upstream (`prebid/salesagent`)
+
+1. Pre-sync: `git fetch upstream && git log --oneline main..upstream/main` to see incoming
+2. Pre-sync: `git diff upstream/main..main --stat` to see fork's current delta inventory
+3. Create branch: `git checkout -b sync/upstream-main-$(date +%Y%m%d) && git rebase upstream/main`
+4. Resolve conflicts using the watch list in `.claude/rules/workflows/upstream-sync-and-fork-changes.md` — re-apply curation changes as minimal additive overlays
+5. Post-sync: `make quality && ./run_all_tests.sh`
+6. Post-sync: re-check delta inventory — `git log --oneline upstream/main..HEAD` should reflect curation work plus the new upstream commits, nothing else
+7. Open PR: `gh pr create --base main --title "chore: sync fork with upstream prebid/salesagent main"`
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
